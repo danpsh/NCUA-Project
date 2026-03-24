@@ -4,26 +4,24 @@ import os
 
 st.set_page_config(page_title="NCUA Dashboard", layout="wide")
 
-# ── STEP 1: AUTOMATIC INGEST (The "Background Cook") ────────────────────────
 def auto_ingest():
     if not os.path.exists("ncua_data.parquet"):
         with st.status("First-time setup: Processing NCUA files...", expanded=True) as status:
             try:
-                # 1. Load Files
+                # 1. Load Files - Switching to comma separator based on your error log
                 st.write("Reading Financials (FS220.txt)...")
-                df_fs = pd.read_csv("FS220.txt", sep="|", encoding="latin-1", low_memory=False)
+                # We use sep=None and engine='python' so pandas "sniffs" if it's a comma or pipe
+                df_fs = pd.read_csv("FS220.txt", sep=None, engine='python', encoding="latin-1", low_memory=False)
                 
                 st.write("Reading Profiles (FOICU.txt)...")
-                df_pro = pd.read_csv("FOICU.txt", sep="|", encoding="latin-1", low_memory=False)
+                df_pro = pd.read_csv("FOICU.txt", sep=None, engine='python', encoding="latin-1", low_memory=False)
                 
-                # 2. Clean Column Names (The Fix)
-                # This forces 'CU_NUMBER ' or 'CU_Number' to become 'cu_number'
-                df_fs.columns = [str(c).lower().strip() for c in df_fs.columns]
-                df_pro.columns = [str(c).lower().strip() for c in df_pro.columns]
+                # 2. Clean Column Names
+                df_fs.columns = [str(c).lower().strip().replace('"', '') for c in df_fs.columns]
+                df_pro.columns = [str(c).lower().strip().replace('"', '') for c in df_pro.columns]
                 
                 # 3. Merge
                 st.write("Merging files on Charter Number...")
-                # We check if the column exists before merging to avoid the error again
                 if 'cu_number' in df_fs.columns and 'cu_number' in df_pro.columns:
                     final_df = pd.merge(df_fs, df_pro, on="cu_number", how="inner")
                     
@@ -31,14 +29,13 @@ def auto_ingest():
                     final_df.to_parquet("ncua_data.parquet")
                     status.update(label="✅ Data ready!", state="complete", expanded=False)
                 else:
-                    st.error(f"Could not find 'cu_number' column. Available: {list(df_fs.columns[:5])}")
+                    st.error(f"Still can't find 'cu_number'. Found: {list(df_fs.columns[:3])}")
                     st.stop()
                     
             except Exception as e:
                 st.error(f"Error processing files: {e}")
                 st.stop()
 
-# ── STEP 2: LOAD & DISPLAY ──────────────────────────────────────────────────
 st.title("🏦 NCUA Credit Union Dashboard")
 
 auto_ingest()
@@ -50,18 +47,17 @@ def load_data():
 df = load_data()
 
 if df is not None:
-    # Use 'cu_name' or 'name' depending on what NCUA provides in FOICU
+    # Handle column names for names
     name_col = 'cu_name' if 'cu_name' in df.columns else 'name'
     
     cu_list = sorted(df[name_col].unique())
-    selected_cu = st.selectbox("Select a Credit Union", cu_list)
+    selected_cu = st.selectbox("Select a Credit Union", cu_list, index=cu_list.index("BLUCURRENT") if "BLUCURRENT" in cu_list else 0)
     
     row = df[df[name_col] == selected_cu].iloc[0]
     
-    # Financial metrics (Assets = 010, Net Worth = 891)
-    # Using .get() to avoid errors if the specific acct column is missing
-    assets = row.get('acct_010', 0)
-    net_worth = row.get('acct_891', 0)
+    # Assets (010) and Net Worth (891)
+    assets = pd.to_numeric(row.get('acct_010', 0), errors='coerce')
+    net_worth = pd.to_numeric(row.get('acct_891', 0), errors='coerce')
     
     col1, col2, col3 = st.columns(3)
     col1.metric("Total Assets", f"${assets:,.0f}")
