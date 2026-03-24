@@ -1,99 +1,143 @@
 import streamlit as st
 import pandas as pd
+import plotly.express as px
 import os
 
-st.set_page_config(page_title="NCUA Dashboard", page_icon="🏦", layout="wide")
+# --- Page Configuration ---
+st.set_page_config(
+    page_title="NCUA Executive Dashboard",
+    page_icon="🏦",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
+# --- Custom Styling ---
+st.markdown("""
+<style>
+    .metric-card {
+        background: #161b22; border: 1px solid #30363d;
+        border-radius: 8px; padding: 15px; margin-bottom: 10px;
+    }
+    .metric-label { font-size: 12px; color: #8b949e; text-transform: uppercase; }
+    .metric-value { font-size: 24px; font-weight: 700; color: #58a6ff; }
+</style>
+""", unsafe_allow_html=True)
+
+# --- Data Engine (Auto-Ingest) ---
 def auto_ingest():
+    """Combines FS220 and FOICU into a high-speed Parquet file if missing."""
     if not os.path.exists("ncua_data.parquet"):
-        with st.status("First-time setup: Processing NCUA files...", expanded=True) as status:
+        with st.status("🚀 First-time setup: Processing NCUA files...", expanded=True) as status:
             try:
-                # 1. Load Files - Removing 'low_memory' to satisfy the Python engine
-                st.write("Reading Financials (FS220.txt)...")
+                st.write("Loading Financials (FS220.txt)...")
                 df_fs = pd.read_csv("FS220.txt", sep=None, engine='python', encoding="latin-1")
                 
-                st.write("Reading Profiles (FOICU.txt)...")
+                st.write("Loading Profiles (FOICU.txt)...")
                 df_pro = pd.read_csv("FOICU.txt", sep=None, engine='python', encoding="latin-1")
                 
-                # 2. Clean Column Names (Removes quotes and spaces)
+                # Normalize headers
                 df_fs.columns = [str(c).lower().strip().replace('"', '') for c in df_fs.columns]
                 df_pro.columns = [str(c).lower().strip().replace('"', '') for c in df_pro.columns]
                 
-                # 3. Merge
-                st.write("Merging files on Charter Number...")
+                st.write("Merging data on Charter Number...")
                 if 'cu_number' in df_fs.columns and 'cu_number' in df_pro.columns:
                     final_df = pd.merge(df_fs, df_pro, on="cu_number", how="inner")
                     
-                    st.write("Saving high-speed data file...")
-                    final_df.to_parquet("ncua_data.parquet")
-                    status.update(label="✅ Data ready!", state="complete", expanded=False)
-                else:
-                    st.error(f"Still can't find 'cu_number'. Found: {list(df_fs.columns[:3])}")
-                    st.stop()
+                    # Convert key financial strings to numbers for math
+                    for col in ['acct_010', 'acct_891']:
+                        if col in final_df.columns:
+                            final_df[col] = pd.to_numeric(final_df[col], errors='coerce').fillna(0)
                     
+                    st.write("Optimizing for speed...")
+                    final_df.to_parquet("ncua_data.parquet")
+                    status.update(label="✅ Data Ready!", state="complete", expanded=False)
+                else:
+                    st.error("Missing 'cu_number' in source files.")
+                    st.stop()
             except Exception as e:
-                st.error(f"Error processing files: {e}")
+                st.error(f"Ingest Error: {e}")
                 st.stop()
 
-# --- MAIN APP ---
-st.title("🏦 NCUA Credit Union Dashboard")
-
+# --- Load Data ---
 auto_ingest()
 
 @st.cache_data
-def load_data():
-    if os.path.exists("ncua_data.parquet"):
-        return pd.read_parquet("ncua_data.parquet")
-    return None
+def get_cached_data():
+    return pd.read_parquet("ncua_data.parquet")
 
-df = load_data()
+df = get_cached_data()
+
+# --- Main Dashboard ---
+st.title("🏦 NCUA Credit Union Dashboard")
 
 if df is not None:
-    # Handle naming columns
-    name_col = 'cu_name' if 'cu_name' in df.columns else 'name'
-    
-    # --- Sidebar Filters ---
+    # 1. Sidebar Controls
     with st.sidebar:
-        st.header("Filters")
-        state_filter = st.multiselect("Filter by State", sorted(df['state'].dropna().unique()), default=["MO"])
-    
-    # Filter data based on state
+        st.header("Global Filters")
+        all_states = sorted(df['state'].dropna().unique())
+        state_filter = st.multiselect("Select State(s)", all_states, default=["MO"])
+        
+        st.divider()
+        st.caption("Data Source: NCUA 5300 Call Report")
+
+    # 2. Filter Logic
     filtered_df = df[df['state'].isin(state_filter)] if state_filter else df
     
-    # Selection UI
+    # 3. CU Selection
+    name_col = 'cu_name' if 'cu_name' in df.columns else 'name'
     cu_list = sorted(filtered_df[name_col].unique())
     
-    # Default to BLUCURRENT if it exists in the list
-    default_index = 0
+    # Default selection logic for BluCurrent
+    default_idx = 0
     for i, name in enumerate(cu_list):
         if "BLUCURRENT" in str(name).upper():
-            default_index = i
+            default_idx = i
             break
-            
-    selected_cu = st.selectbox("Select a Credit Union", cu_list, index=default_index)
-    
-    # --- UI Layout ---
+
+    selected_cu = st.selectbox("Select Institution", cu_list, index=default_idx)
     row = filtered_df[filtered_df[name_col] == selected_cu].iloc[0]
-    
-    # Convert acct codes to numbers (Assets=010, Net Worth=891)
-    assets = pd.to_numeric(row.get('acct_010', 0), errors='coerce')
-    net_worth = pd.to_numeric(row.get('acct_891', 0), errors='coerce')
-    
+
+    # 4. Key Performance Indicators (KPIs)
+    assets = row['acct_010']
+    net_worth = row['acct_891']
+    nw_ratio = (net_worth / assets * 100) if assets > 0 else 0
+
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric("Total Assets", f"${assets:,.0f}")
+        st.markdown(f'<div class="metric-card"><div class="metric-label">Total Assets</div><div class="metric-value">${assets:,.0f}</div></div>', unsafe_allow_html=True)
     with col2:
-        st.metric("Net Worth", f"${net_worth:,.0f}")
+        st.markdown(f'<div class="metric-card"><div class="metric-label">Net Worth</div><div class="metric-value">${net_worth:,.0f}</div></div>', unsafe_allow_html=True)
     with col3:
-        nw_ratio = (net_worth/assets)*100 if assets > 0 else 0
-        st.metric("Net Worth Ratio", f"{nw_ratio:.2f}%")
+        st.markdown(f'<div class="metric-card"><div class="metric-label">Net Worth Ratio</div><div class="metric-value">{nw_ratio:.2f}%</div></div>', unsafe_allow_html=True)
 
-    st.markdown("---")
-    st.subheader(f"Institutional Profile: {selected_cu}")
+    # 5. Peer Distribution Chart
+    st.divider()
+    st.subheader(f"Peer Comparison: Net Worth Ratio ({', '.join(state_filter) if state_filter else 'US'})")
     
-    p_col1, p_col2 = st.columns(2)
-    p_col1.write(f"**City/State:** {row.get('city', 'N/A')}, {row.get('state', 'N/A')}")
-    p_col1.write(f"**Charter Number:** {row.get('cu_number', 'N/A')}")
+    # Prep chart data
+    chart_df = filtered_df.copy()
+    chart_df['nw_ratio_calc'] = (chart_df['acct_891'] / chart_df['acct_010']) * 100
+    chart_df = chart_df[chart_df['nw_ratio_calc'].between(0, 30)] # Filter outliers for better visual
+
+    fig = px.histogram(
+        chart_df, 
+        x="nw_ratio_calc", 
+        nbins=40,
+        labels={'nw_ratio_calc': 'Net Worth Ratio (%)'},
+        template="plotly_dark",
+        color_discrete_sequence=['#30363d']
+    )
     
-    p_col2.write(f"**Cycle Date:** {row.get('cycle_date', 'N/A')}")
-    p_col2.write(f"**Join Number:** {row.get('join_number', 'N/A')}")
+    # Add indicator for selected CU
+    fig.add_vline(x=nw_ratio, line_dash="dash", line_color="#58a6ff")
+    fig.add_annotation(x=nw_ratio, text=f" {selected_cu}", showarrow=False, xanchor="left", font_color="#58a6ff")
+    
+    fig.update_layout(margin=dict(l=20, r=20, t=20, b=20), height=350)
+    st.plotly_chart(fig, use_container_width=True)
+
+    # 6. Profile Table
+    with st.expander("🔍 View Full Institutional Profile"):
+        st.table(pd.DataFrame({
+            "Field": ["City", "State", "Charter Number", "Cycle Date", "Join Number"],
+            "Value": [row.get('city'), row.get('state'), row.get('cu_number'), row.get('cycle_date'), row.get('join_number')]
+        }))
