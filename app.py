@@ -579,26 +579,28 @@ def merger_table(cycle_sig):
 
 
 @st.cache_data(show_spinner=False)
-def acquirers_in_window(cycle, basis, cycle_sig):
-    """Charters that absorbed a CU during the growth window -> count absorbed.
-    YoY -> the trailing four report quarters; QoQ -> the selected quarter."""
+def merger_acquirers(cycle, cycle_sig, lookback=4):
+    """Continuing (acquiring) charters whose absorbed CU actually DISAPPEARED from
+    the call reports within the last `lookback` quarters -> count absorbed.
+
+    Keyed off when assets transferred (the merged charter vanishes), not the merger
+    approval date — approvals can precede the call-report impact by several quarters.
+    """
     mg = merger_table(cycle_sig)
     if mg.empty:
         return {}
-    base = yoy_cycle(cycle) if basis == "YoY" else prior_cycle(cycle)
-    rep = sorted(mg.cycle.unique())
-    win = [c for c in rep if c <= cycle and (base is None or c > base)]
-    return mg[mg.cycle.isin(win)].continuing_charter.value_counts().to_dict()
-
-
-@st.cache_data(show_spinner=False)
-def acquirers_trailing(cycle, quarters, cycle_sig):
-    """Charters that absorbed a CU in the last `quarters` report quarters up to cycle."""
-    mg = merger_table(cycle_sig)
-    if mg.empty:
+    cs = sorted(cycle_sig)
+    if cycle not in cs:
         return {}
-    rep = [c for c in sorted(mg.cycle.unique()) if c <= cycle][-quarters:]
-    return mg[mg.cycle.isin(rep)].continuing_charter.value_counts().to_dict()
+    base = yoy_cycle(cycle) if lookback == 4 else None
+    if base not in cs:
+        i = cs.index(cycle)
+        base = cs[max(0, i - lookback)]
+    cur = set(metrics_table(cycle).cu)
+    were = set(metrics_table(base).cu)
+    vanished = were - cur                      # charters that left during the window
+    sub = mg[mg.merging_charter.isin(vanished)]
+    return sub.groupby("continuing_charter")["merging_charter"].nunique().to_dict()
 
 
 def compute_flags(row, mt):
@@ -918,7 +920,7 @@ elif page == "Rankings":
     default_desc = META[rank_key][2] != "low"
     order = g2.radio("Order", ["Top (high→low)", "Bottom (low→high)"],
                      index=0 if default_desc else 1, horizontal=True)
-    acq = acquirers_trailing(cycle, 4, sig)
+    acq = merger_acquirers(cycle, sig)
     excl = False
     if acq:
         excl = st.checkbox("Exclude credit unions that absorbed another in the last 4 quarters "
@@ -961,7 +963,7 @@ elif page == "Movers":
     min_assets = m2.selectbox("Minimum asset size",
                               ["$10M", "$50M", "$100M", "$500M", "$1B"], index=1)
     floor = {"$10M": 10e6, "$50M": 50e6, "$100M": 100e6, "$500M": 500e6, "$1B": 1e9}[min_assets]
-    acq = acquirers_trailing(cycle, 4, sig)
+    acq = merger_acquirers(cycle, sig)
     hide = False
     if acq:
         hide = st.checkbox("Exclude merger-driven growth (credit unions that absorbed "
