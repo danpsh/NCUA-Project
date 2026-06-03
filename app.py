@@ -322,20 +322,28 @@ def growth_for(cycle, basis, cycle_sig):
 @st.cache_data(show_spinner=False)
 def enriched_table(cycle, basis, cycle_sig):
     df = metrics_table(cycle).merge(growth_for(cycle, basis, cycle_sig), on="cu", how="left")
-    # Composite score: weighted blend of band-relative z-scores (SDs from the
-    # asset-band peer mean). Direction-adjusted so positive always = better.
+    # Recent acquirers (a CU they absorbed left the call reports in the last 4 quarters).
+    acq = merger_acquirers(cycle, cycle_sig)
+    is_acq = df.cu.isin(acq)
+    df["is_acquirer"] = is_acq
+    # Composite score: weighted blend of band-relative z-scores (SDs from the asset-band
+    # peer mean). The peer mean/std EXCLUDE recent acquirers, so merger-driven growth
+    # outliers don't distort the baseline; acquirers are still scored, but get no credit
+    # for merger-bought growth. Direction-adjusted so positive always = better.
     acc = pd.Series(0.0, index=df.index)
     wsum = pd.Series(0.0, index=df.index)
     for key, w in SCORE_WEIGHTS:
-        grp = df.groupby("band")[key]
-        std = grp.transform("std")
-        z = (df[key] - grp.transform("mean")) / std
-        z = z.where(std > 0)                              # undefined where no spread
+        peers = df.loc[~is_acq]                           # clean baseline (no acquirers)
+        stats = peers.groupby("band")[key].agg(["mean", "std"])
+        mean = df.band.map(stats["mean"])
+        std = df.band.map(stats["std"])
+        z = ((df[key] - mean) / std).where(std > 0)       # undefined where no spread
         if META[key][2] == "low":
             z = -z                                        # lower is better → flip sign
         df[f"z_{key}"] = z
-        acc = acc + z.fillna(0) * w
-        wsum = wsum + z.notna().astype(float) * w
+        contrib = z.mask(is_acq) if key.endswith("_growth") else z   # no merger-growth credit
+        acc = acc + contrib.fillna(0) * w
+        wsum = wsum + contrib.notna().astype(float) * w
     df["score_z"] = (acc / wsum).where(wsum > 0)          # weighted composite z
     df["score"] = (50 + 30 * df["score_z"]).clip(0, 100)  # 50 = peer average
     df["stars"] = df["score_z"].apply(stars_from_z)
@@ -639,10 +647,14 @@ def comparison_frames(cus, mt, labels):
 
 def score_breakdown(row):
     rows = []
+    is_acq = bool(row.get("is_acquirer"))
     for key, w in SCORE_WEIGHTS:
         z = row.get(f"z_{key}")
-        rows.append((META[key][0], fmt(key, row[key]),
-                     f"{z:+.2f} SD" if pd.notna(z) else "—", f"{w * 100:.0f}%"))
+        if is_acq and key.endswith("_growth"):
+            rows.append((META[key][0], fmt(key, row[key]), "excluded — merger", "—"))
+        else:
+            rows.append((META[key][0], fmt(key, row[key]),
+                         f"{z:+.2f} SD" if pd.notna(z) else "—", f"{w * 100:.0f}%"))
     return pd.DataFrame(rows, columns=["Metric", "Value", "Peer z-score", "Weight"])
 
 
