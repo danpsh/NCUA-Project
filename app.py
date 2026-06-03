@@ -722,10 +722,13 @@ elif page == "Rankings":
         view = view[view.band.isin(sel_bands)]
     view = view.dropna(subset=[rank_key]).sort_values(
         rank_key, ascending=order.startswith("Bottom")).head(int(top_n))
-    show_keys = ["score", "stars", "assets", "net_worth", "roa", "efficiency",
-                 "nw_ratio", "delinquency"]
-    if rank_key not in show_keys:
-        show_keys.insert(0, rank_key)
+    if rank_key in ("score", "stars"):
+        show_keys = ["score", "stars"] + [k for k, _ in SCORE_WEIGHTS]
+    else:
+        show_keys = ["score", "stars", "assets", "net_worth", "roa", "efficiency",
+                     "nw_ratio", "delinquency"]
+        if rank_key not in show_keys:
+            show_keys.insert(2, rank_key)
     disp = pd.DataFrame({"Credit Union": view.cu_name.values, "State": view.state.values})
     for k in show_keys:
         disp[META[k][0]] = [fmt(k, x) for x in view[k].values]
