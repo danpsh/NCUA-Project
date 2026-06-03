@@ -202,6 +202,27 @@ def metric_card(col, key, row, prev_row):
     col.metric(META[key][0], fmt(key, row[key]), delta=text, delta_color=color)
 
 
+def color_scale(series, direction):
+    """Per-cell CSS backgrounds for a Styler: green = good, red = bad, scaled by the
+    value's within-column percentile. direction 'high' -> higher is better, 'low' ->
+    lower is better, None -> no color."""
+    s = pd.to_numeric(pd.Series(list(series)), errors="coerce")
+    if direction is None or s.notna().sum() < 3:
+        return ["" for _ in range(len(s))]
+    ranks = s.rank(pct=True)
+    css = []
+    for v, p in zip(s, ranks):
+        if pd.isna(v) or pd.isna(p):
+            css.append("")
+            continue
+        good = p if direction == "high" else 1 - p        # 1 = best in column
+        if good >= 0.5:
+            css.append(f"background-color: rgba(22,163,74,{(good - 0.5) * 0.7:.2f})")
+        else:
+            css.append(f"background-color: rgba(220,38,38,{(0.5 - good) * 0.7:.2f})")
+    return css
+
+
 def to_excel_bytes(sheets):
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as xw:
@@ -794,7 +815,7 @@ if page == "Profile":
                                f"{str(_p.conv_type).title()} conversion ({_p.cycle}). "
                                "History below is linked across the change.")
 
-            # ---- KPI hero row -------------------------------------------------
+            # ---- KPI hero row (persistent above the tabs) ---------------------
             h = st.columns(5)
             for c, key in zip(h[:4], ["assets", "members", "nw_ratio", "roa"]):
                 metric_card(c, key, row, prev_row)
@@ -809,8 +830,6 @@ if page == "Profile":
             if prev_row is not None:
                 cap += f"  ·  ▲▼ deltas vs prior quarter ({prev_cy})."
             st.caption(cap)
-            with st.expander("How this score is built"):
-                st.dataframe(score_breakdown(row), use_container_width=True, hide_index=True)
 
             flags = compute_flags(row, mt)
             if flags:
@@ -819,164 +838,179 @@ if page == "Profile":
             else:
                 st.success("No watch flags — capital, earnings, and asset quality look sound.")
 
-            scorecard_groups = [
-                ("Size & membership", ["assets", "loans", "shares", "net_worth", "members"]),
-                ("Earnings", ["roa", "roe", "nim", "net_income", "efficiency"]),
-                ("Capital & asset quality", ["nw_ratio", "delinquency", "nco", "lts"]),
-                (f"Growth ({growth_label.lower()})", GROWTH_KEYS),
-            ]
-            for title, keys in scorecard_groups:
-                st.markdown(f"**{title}**")
-                cols = st.columns(len(keys))
-                for col, key in zip(cols, keys):
-                    metric_card(col, key, row, prev_row)
+            tab_ov, tab_fin, tab_tr, tab_peer, tab_mrg = st.tabs(
+                ["Overview", "Financials", "Trends", "Peers", "Mergers"])
 
-            # one-click Excel export of this CU's scorecard
-            sc = pd.DataFrame(
-                {"Value": {META[k][0]: fmt(k, row[k]) for k, _, _, _ in METRICS}})
-            st.download_button(
-                "Download scorecard (Excel)",
-                to_excel_bytes({"Scorecard": sc}),
-                file_name=f"{row.cu_name}_{cycle}_scorecard.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
+            # ===================================================== OVERVIEW
+            with tab_ov:
+                with st.expander("How this score is built"):
+                    st.dataframe(score_breakdown(row), use_container_width=True,
+                                 hide_index=True)
+                scorecard_groups = [
+                    ("Size & membership", ["assets", "loans", "shares", "net_worth", "members"]),
+                    ("Earnings", ["roa", "roe", "nim", "net_income", "efficiency"]),
+                    ("Capital & asset quality", ["nw_ratio", "delinquency", "nco", "lts"]),
+                    (f"Growth ({growth_label.lower()})", GROWTH_KEYS),
+                ]
+                for title, keys in scorecard_groups:
+                    st.markdown(f"**{title}**")
+                    cols = st.columns(len(keys))
+                    for col, key in zip(cols, keys):
+                        metric_card(col, key, row, prev_row)
+                sc = pd.DataFrame(
+                    {"Value": {META[k][0]: fmt(k, row[k]) for k, _, _, _ in METRICS}})
+                st.download_button(
+                    "Download scorecard (Excel)",
+                    to_excel_bytes({"Scorecard": sc}),
+                    file_name=f"{row.cu_name}_{cycle}_scorecard.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+                with st.expander("Efficiency Ratio breakdown"):
+                    nii = row.int_income - row.int_expense
+                    rev = nii + row.non_int_income
+                    bd = pd.DataFrame([
+                        ("Total Interest Income", money(row.int_income)),
+                        ("− Total Interest Expense", money(row.int_expense)),
+                        ("= Net Interest Income", money(nii)),
+                        ("+ Non-Interest Income", money(row.non_int_income)),
+                        ("= Revenue (denominator)", money(rev)),
+                        ("Operating Expense (numerator)", money(row.opex)),
+                        ("Efficiency Ratio", pct(row.efficiency)),
+                    ], columns=["Component", "Value"])
+                    st.dataframe(bd, use_container_width=True, hide_index=True)
 
-            with st.expander("Efficiency Ratio breakdown"):
-                nii = row.int_income - row.int_expense
-                rev = nii + row.non_int_income
-                bd = pd.DataFrame([
-                    ("Total Interest Income", money(row.int_income)),
-                    ("− Total Interest Expense", money(row.int_expense)),
-                    ("= Net Interest Income", money(nii)),
-                    ("+ Non-Interest Income", money(row.non_int_income)),
-                    ("= Revenue (denominator)", money(rev)),
-                    ("Operating Expense (numerator)", money(row.opex)),
-                    ("Efficiency Ratio", pct(row.efficiency)),
-                ], columns=["Component", "Value"])
-                st.dataframe(bd, use_container_width=True, hide_index=True)
-
-            if len(all_cycles) > 1:
-                st.subheader("Trends")
-                ts = cu_timeseries(cu, sig)
-                trend_opts = [k for k, _, _, _ in METRICS if not k.endswith("_growth")]
-                tc1, tc2 = st.columns([1, 3])
-                tspan = tc1.radio("Period", ["Quarters", "Years"], horizontal=True)
-                chosen = tc2.multiselect(
-                    "Metrics to chart", trend_opts,
-                    default=["assets", "roa", "efficiency", "delinquency"],
-                    format_func=lambda k: META[k][0])
-                if tspan == "Years" and not ts.empty:
-                    ts = ts[[str(i).endswith("-12") for i in ts.index]]
-                if not ts.empty and chosen:
-                    grid = st.columns(2)
-                    for i, key in enumerate(chosen):
-                        with grid[i % 2]:
-                            st.caption(META[key][0])
-                            st.line_chart(ts[[key]].rename(columns={key: META[key][0]}))
-
-            st.subheader("Peer benchmarking")
-            basis_choice = st.radio(
-                "Compare against",
-                ["Similar asset size", f"Same state ({row.state})",
-                 "Same state + asset size", "All credit unions", "Custom (pick CUs)"],
-                horizontal=True)
-            if basis_choice == "Custom (pick CUs)":
-                picks = st.multiselect("Choose peer credit unions",
-                                       list(ALL_LABELS), format_func=lambda n: ALL_LABELS[n])
-                peers = mt[mt.cu.isin(picks + [cu])] if picks else mt.iloc[0:0]
-            elif basis_choice == "Similar asset size":
-                peers = mt[mt.band == row.band]
-            elif basis_choice.startswith("Same state ("):
-                peers = mt[mt.state == row.state]
-            elif "state + asset" in basis_choice:
-                peers = mt[(mt.state == row.state) & (mt.band == row.band)]
-            else:
-                peers = mt
-            st.caption(f"Peer group: {len(peers):,} credit unions")
-
-            if len(peers) >= 2:
-                ratio_keys = ["roa", "roe", "nim", "efficiency", "nw_ratio", "lts",
-                              "delinquency", "nco"] + GROWTH_KEYS
-                bench = []
-                for key in ratio_keys:
-                    lbl, _, dirn = META[key]
-                    v = row[key]
-                    s = peers[key].dropna()
-                    if pd.isna(v) or s.empty:
-                        bench.append((lbl, fmt(key, v), "—", "—"))
-                        continue
-                    med = s.median()
-                    if dirn == "high":
-                        rank = f"better than {(s < v).mean() * 100:.0f}% of peers"
-                    elif dirn == "low":
-                        rank = f"better than {(s > v).mean() * 100:.0f}% of peers"
+            # ===================================================== FINANCIALS
+            with tab_fin:
+                sc1, sc2 = st.columns(2)
+                stmt = sc1.radio("Statement", ["Balance sheet", "Income statement"],
+                                 horizontal=True)
+                pmode = sc2.radio("Periods", ["Quarters", "Years"], horizontal=True)
+                schema = BALANCE_SHEET if stmt == "Balance sheet" else INCOME_STATEMENT
+                sdf = build_statement(cu, schema, stmt == "Income statement", pmode, cycle, sig)
+                if sdf.empty:
+                    st.info("No statement data available for this credit union and period.")
+                else:
+                    st.dataframe(sdf, use_container_width=True, hide_index=True,
+                                 height=38 * len(sdf) + 38)
+                    note = ("Built from NCUA call report accounts and tied to the reported "
+                            "totals. Lines marked “implied” (investments, provision for credit "
+                            "losses, other) are derived so the statement foots exactly.")
+                    if stmt == "Income statement":
+                        note += (" Income figures are year-to-date in the call report; the "
+                                 "Quarters view de-cumulates them into standalone quarters.")
+                    st.caption(note)
+                with st.expander("Raw call report tables (advanced)"):
+                    table = st.selectbox("Table", [t for t in tables if t not in BROWSE_SKIP])
+                    try:
+                        raw = con.execute(
+                            f"SELECT * FROM read_parquet('{glob_for(table)}', "
+                            "hive_partitioning=true, union_by_name=true) "
+                            "WHERE cycle = ? AND CU_NUMBER = ?", [cycle, cu]).df()
+                    except Exception as e:
+                        st.warning(f"Could not read {table}: {e}")
+                        raw = pd.DataFrame()
+                    if raw.empty:
+                        st.write("No rows for this credit union in this table.")
                     else:
-                        rank = f"{(s < v).mean() * 100:.0f}th percentile"
-                    bench.append((lbl, fmt(key, v), fmt(key, med), rank))
-                st.dataframe(pd.DataFrame(
-                    bench, columns=["Metric", "This CU", "Peer median", "Standing"]),
-                    use_container_width=True, hide_index=True)
-            else:
-                st.info("Pick at least one peer to benchmark against.")
+                        out = raw.T.reset_index()
+                        out.columns = ["account"] + [f"value{i}" if i else "value"
+                                                     for i in range(out.shape[1] - 1)]
+                        out.insert(1, "description",
+                                   out["account"].str.upper().map(acct_names()).fillna(""))
+                        st.dataframe(out, use_container_width=True, height=400)
 
-            with st.expander("Identity / FOICU fields"):
-                foicu = con.execute(
-                    f"SELECT * FROM read_parquet('{glob_for('FOICU')}', hive_partitioning=true, union_by_name=true) "
-                    "WHERE cycle = ? AND CU_NUMBER = ?", [cycle, cu]).df()
-                st.dataframe(foicu.T, use_container_width=True)
+            # ===================================================== TRENDS
+            with tab_tr:
+                if len(all_cycles) > 1:
+                    tsd = cu_timeseries(cu, sig)
+                    trend_opts = [k for k, _, _, _ in METRICS if not k.endswith("_growth")]
+                    tc1, tc2 = st.columns([1, 3])
+                    tspan = tc1.radio("Period", ["Quarters", "Years"], horizontal=True)
+                    chosen = tc2.multiselect(
+                        "Metrics to chart", trend_opts,
+                        default=["assets", "roa", "efficiency", "delinquency"],
+                        format_func=lambda k: META[k][0])
+                    if tspan == "Years" and not tsd.empty:
+                        tsd = tsd[[str(i).endswith("-12") for i in tsd.index]]
+                    if not tsd.empty and chosen:
+                        grid = st.columns(2)
+                        for i, key in enumerate(chosen):
+                            with grid[i % 2]:
+                                st.caption(META[key][0])
+                                st.line_chart(tsd[[key]].rename(columns={key: META[key][0]}))
+                else:
+                    st.info("Only one quarter of data is available — trends need more history.")
 
-            st.subheader("Financial statements")
-            sc1, sc2 = st.columns(2)
-            stmt = sc1.radio("Statement", ["Balance sheet", "Income statement"], horizontal=True)
-            pmode = sc2.radio("Periods", ["Quarters", "Years"], horizontal=True)
-            schema = BALANCE_SHEET if stmt == "Balance sheet" else INCOME_STATEMENT
-            sdf = build_statement(cu, schema, stmt == "Income statement", pmode, cycle, sig)
-            if sdf.empty:
-                st.info("No statement data available for this credit union and period.")
-            else:
-                st.dataframe(sdf, use_container_width=True, hide_index=True,
-                             height=38 * len(sdf) + 38)
-                note = ("Built from NCUA call report accounts and tied to the reported totals. "
-                        "Lines marked “implied” (investments, provision for credit losses, other) "
-                        "are derived so the statement foots exactly.")
-                if stmt == "Income statement":
-                    note += (" Income figures are year-to-date in the call report; the Quarters "
-                             "view de-cumulates them into standalone quarters.")
-                st.caption(note)
+            # ===================================================== PEERS
+            with tab_peer:
+                basis_choice = st.radio(
+                    "Compare against",
+                    ["Similar asset size", f"Same state ({row.state})",
+                     "Same state + asset size", "All credit unions", "Custom (pick CUs)"],
+                    horizontal=True)
+                if basis_choice == "Custom (pick CUs)":
+                    picks = st.multiselect("Choose peer credit unions",
+                                           list(ALL_LABELS),
+                                           format_func=lambda n: ALL_LABELS[n])
+                    peers = mt[mt.cu.isin(picks + [cu])] if picks else mt.iloc[0:0]
+                elif basis_choice == "Similar asset size":
+                    peers = mt[mt.band == row.band]
+                elif basis_choice.startswith("Same state ("):
+                    peers = mt[mt.state == row.state]
+                elif "state + asset" in basis_choice:
+                    peers = mt[(mt.state == row.state) & (mt.band == row.band)]
+                else:
+                    peers = mt
+                st.caption(f"Peer group: {len(peers):,} credit unions")
+                if len(peers) >= 2:
+                    ratio_keys = ["roa", "roe", "nim", "efficiency", "nw_ratio", "lts",
+                                  "delinquency", "nco"] + GROWTH_KEYS
+                    bench = []
+                    for key in ratio_keys:
+                        lbl, _, dirn = META[key]
+                        v = row[key]
+                        s = peers[key].dropna()
+                        if pd.isna(v) or s.empty:
+                            bench.append((lbl, fmt(key, v), "—", "—"))
+                            continue
+                        med = s.median()
+                        if dirn == "high":
+                            rank = f"better than {(s < v).mean() * 100:.0f}% of peers"
+                        elif dirn == "low":
+                            rank = f"better than {(s > v).mean() * 100:.0f}% of peers"
+                        else:
+                            rank = f"{(s < v).mean() * 100:.0f}th percentile"
+                        bench.append((lbl, fmt(key, v), fmt(key, med), rank))
+                    st.dataframe(pd.DataFrame(
+                        bench, columns=["Metric", "This CU", "Peer median", "Standing"]),
+                        use_container_width=True, hide_index=True)
+                else:
+                    st.info("Pick at least one peer to benchmark against.")
+                with st.expander("Identity / FOICU fields"):
+                    foicu = con.execute(
+                        f"SELECT * FROM read_parquet('{glob_for('FOICU')}', "
+                        "hive_partitioning=true, union_by_name=true) "
+                        "WHERE cycle = ? AND CU_NUMBER = ?", [cycle, cu]).df()
+                    st.dataframe(foicu.T, use_container_width=True)
 
-            mg = merger_table(sig)
-            if not mg.empty:
-                mine = mg[mg.continuing_charter == cu].sort_values("cycle", ascending=False)
+            # ===================================================== MERGERS
+            with tab_mrg:
+                mg = merger_table(sig)
+                mine = (mg[mg.continuing_charter == cu].sort_values("cycle", ascending=False)
+                        if not mg.empty else pd.DataFrame())
                 if not mine.empty:
-                    st.subheader("Mergers absorbed")
                     st.caption(f"This credit union has absorbed {len(mine)} other "
-                               f"{'institution' if len(mine) == 1 else 'institutions'} since 2018, "
-                               "per the NCUA Insurance Report of Activity.")
+                               f"{'institution' if len(mine) == 1 else 'institutions'} since "
+                               "2018, per the NCUA Insurance Report of Activity.")
                     st.dataframe(pd.DataFrame({
                         "Quarter": mine.cycle.values,
                         "Absorbed": mine.merging_name.values,
                         "Assets at merger": [money(x) for x in mine.merging_assets.values],
                         "Reason": mine.reason.values}),
                         use_container_width=True, hide_index=True)
-
-            with st.expander("Raw call report tables (advanced)"):
-                table = st.selectbox("Table", [t for t in tables if t not in BROWSE_SKIP])
-                try:
-                    raw = con.execute(
-                        f"SELECT * FROM read_parquet('{glob_for(table)}', hive_partitioning=true, union_by_name=true) "
-                        "WHERE cycle = ? AND CU_NUMBER = ?", [cycle, cu]).df()
-                except Exception as e:
-                    st.warning(f"Could not read {table}: {e}")
-                    raw = pd.DataFrame()
-                if raw.empty:
-                    st.write("No rows for this credit union in this table.")
                 else:
-                    out = raw.T.reset_index()
-                    out.columns = ["account"] + [f"value{i}" if i else "value"
-                                                 for i in range(out.shape[1] - 1)]
-                    out.insert(1, "description",
-                               out["account"].str.upper().map(acct_names()).fillna(""))
-                    st.dataframe(out, use_container_width=True, height=400)
+                    st.info("No absorbed mergers recorded for this credit union in the "
+                            "NCUA Insurance Report of Activity.")
 
 # ============================================================ COMPARE
 elif page == "Compare":
@@ -1089,13 +1123,16 @@ elif page == "Movers":
         lose = pool.nsmallest(15, gkey)[cols]
 
         def fmt_movers(df):
+            gcol = META[gkey][0]
             d = pd.DataFrame({
                 "Credit Union": df.cu_name.values, "State": df.state.values,
                 "Assets": [money(x) for x in df.assets.values],
-                META[gkey][0]: [pct(x) for x in df[gkey].values]})
+                gcol: df[gkey].values})                     # numeric → colored + formatted
             if tagged and not hide:
                 d["Merger"] = df._tag.values
-            return d
+            return (d.style
+                    .format({gcol: pct})
+                    .apply(lambda c: color_scale(c, "high"), subset=[gcol]))
 
         a, b = st.columns(2)
         with a:
