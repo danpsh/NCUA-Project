@@ -53,7 +53,18 @@ METRICS = [
     ("shares_growth", "Share Growth", "pct", "high"),
 ]
 META = {k: (lbl, fmt, dirn) for k, lbl, fmt, dirn in METRICS}
+# Derived ratings (not raw call-report metrics, so kept out of the METRICS loops
+# but given META entries so fmt() and labels work in rankings/compare).
+META["score"] = ("Composite Score", "score", "high")
+META["stars"] = ("Star Rating", "stars", "high")
 GROWTH_KEYS = ["assets_growth", "members_growth", "loans_growth", "shares_growth"]
+
+# Composite score: weighted blend of band-relative percentiles (capital, earnings,
+# efficiency, asset quality, growth). Weights sum to 1.0.
+SCORE_WEIGHTS = [
+    ("roa", 0.25), ("nw_ratio", 0.20), ("efficiency", 0.20),
+    ("delinquency", 0.15), ("nco", 0.10), ("assets_growth", 0.10),
+]
 
 BANDS = [
     (0, 10e6, "< $10M"), (10e6, 50e6, "$10M–50M"), (50e6, 100e6, "$50M–100M"),
@@ -107,8 +118,25 @@ def pct(x):
     return f"{x:.2f}%" if isinstance(x, (int, float)) and not pd.isna(x) else "—"
 
 
+def stars_str(n):
+    if n is None or pd.isna(n):
+        return "—"
+    n = int(n)
+    return "★" * n + "☆" * (5 - n)
+
+
+def stars_from_score(s):
+    if pd.isna(s):
+        return np.nan
+    return min(5, max(1, int(s // 20) + 1))  # 0-20→1 … 80-100→5
+
+
 def fmt(key, x):
     f = META[key][1]
+    if f == "score":
+        return f"{x:.0f}" if isinstance(x, (int, float)) and not pd.isna(x) else "—"
+    if f == "stars":
+        return stars_str(x)
     return money(x) if f == "money" else intfmt(x) if f == "int" else pct(x)
 
 
@@ -221,7 +249,19 @@ def growth_for(cycle, basis, cycle_sig):
 
 @st.cache_data(show_spinner=False)
 def enriched_table(cycle, basis, cycle_sig):
-    return metrics_table(cycle).merge(growth_for(cycle, basis, cycle_sig), on="cu", how="left")
+    df = metrics_table(cycle).merge(growth_for(cycle, basis, cycle_sig), on="cu", how="left")
+    # Composite score: weighted blend of band-relative "goodness" percentiles.
+    acc = pd.Series(0.0, index=df.index)
+    wsum = pd.Series(0.0, index=df.index)
+    for key, w in SCORE_WEIGHTS:
+        pr = df.groupby("band")[key].rank(pct=True)          # 0–1 within asset band
+        good = pr if META[key][2] == "high" else 1 - pr      # flip low-is-better metrics
+        df[f"g_{key}"] = good
+        acc = acc + good.fillna(0) * w
+        wsum = wsum + good.notna().astype(float) * w
+    df["score"] = (acc / wsum * 100).where(wsum > 0)
+    df["stars"] = df["score"].apply(stars_from_score)
+    return df
 
 
 @st.cache_data(show_spinner=False)
@@ -278,7 +318,7 @@ def compute_flags(row, mt):
 
 
 def comparison_frames(cus, mt, labels):
-    keys = [k for k, _, _, _ in METRICS]
+    keys = ["score", "stars"] + [k for k, _, _, _ in METRICS]
     disp, raw = {}, {}
     for cu in cus:
         r = mt[mt.cu == cu].iloc[0]
@@ -287,6 +327,15 @@ def comparison_frames(cus, mt, labels):
         raw[lbl] = {META[k][0]: r[k] for k in keys}
     order = [META[k][0] for k in keys]
     return pd.DataFrame(disp).reindex(order), pd.DataFrame(raw).reindex(order)
+
+
+def score_breakdown(row):
+    rows = []
+    for key, w in SCORE_WEIGHTS:
+        g = row.get(f"g_{key}")
+        rows.append((META[key][0], fmt(key, row[key]),
+                     f"{g * 100:.0f}th" if pd.notna(g) else "—", f"{w * 100:.0f}%"))
+    return pd.DataFrame(rows, columns=["Metric", "Value", "Band percentile", "Weight"])
 
 
 def multi_cu_series(cus, metric, labels, cycle_sig):
@@ -336,6 +385,19 @@ with profile_tab:
             row = mt[mt.cu == cu].iloc[0]
             st.subheader(labels[cu])
             st.caption(f"Asset peer group: {row.band}")
+
+            # composite rating
+            rc = st.columns([1, 3])
+            rc[0].metric("Composite Score",
+                         f"{row.score:.0f}/100" if pd.notna(row.score) else "—")
+            with rc[1]:
+                st.markdown(
+                    f"<div style='font-size:2.2rem;line-height:1'>{stars_str(row.stars)}</div>",
+                    unsafe_allow_html=True)
+                st.caption(f"Overall performance vs the {row.band} asset peer group, "
+                           "weighting earnings, capital, efficiency, asset quality, and growth.")
+            with st.expander("How this score is built"):
+                st.dataframe(score_breakdown(row), use_container_width=True, hide_index=True)
 
             flags = compute_flags(row, mt)
             if flags:
@@ -499,10 +561,10 @@ with rankings_tab:
     sel_states = f1.multiselect("State(s)", all_states, default=[])
     sel_bands = f2.multiselect("Asset size", [b[2] for b in BANDS], default=[])
     top_n = f3.number_input("Show top", min_value=10, max_value=2000, value=100, step=10)
-    rankable = [k for k, _, _, _ in METRICS]
+    rankable = ["score"] + [k for k, _, _, _ in METRICS]
     g1, g2 = st.columns([2, 1])
     rank_key = g1.selectbox("Rank by", rankable,
-                            format_func=lambda k: META[k][0], index=rankable.index("assets"))
+                            format_func=lambda k: META[k][0], index=0)
     default_desc = META[rank_key][2] != "low"
     order = g2.radio("Order", ["Top (high→low)", "Bottom (low→high)"],
                      index=0 if default_desc else 1, horizontal=True)
@@ -515,7 +577,8 @@ with rankings_tab:
         view = view[view.band.isin(sel_bands)]
     view = view.dropna(subset=[rank_key]).sort_values(
         rank_key, ascending=order.startswith("Bottom")).head(int(top_n))
-    show_keys = ["assets", "net_worth", "roa", "efficiency", "nw_ratio", "delinquency", "lts"]
+    show_keys = ["score", "stars", "assets", "net_worth", "roa", "efficiency",
+                 "nw_ratio", "delinquency"]
     if rank_key not in show_keys:
         show_keys.insert(0, rank_key)
     disp = pd.DataFrame({"Credit Union": view.cu_name.values, "State": view.state.values})
