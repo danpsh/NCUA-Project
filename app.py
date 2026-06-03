@@ -375,20 +375,19 @@ if "FOICU" not in tables:
 
 all_cycles = cycles()
 sig = tuple(sorted(all_cycles))
+page = st.sidebar.radio("View", ["Profile", "Compare", "Rankings", "Movers", "Industry"])
+st.sidebar.divider()
 cycle = st.sidebar.selectbox("Quarter", all_cycles)
 growth_label = st.sidebar.selectbox(
     "Growth basis", ["Year-over-year", "Quarter-over-quarter (annualized)"])
 basis = "YoY" if growth_label.startswith("Year") else "QoQ"
 mt = enriched_table(cycle, basis, sig)
 
-# label helpers shared across tabs
+# label helper shared across pages
 ALL_LABELS = {r.cu: f"{r.cu_name} (#{r.cu}, {r.state})" for r in mt.itertuples()}
 
-profile_tab, compare_tab, rankings_tab, movers_tab, industry_tab = st.tabs(
-    ["Profile", "Compare", "Rankings", "Movers", "Industry"])
-
 # ============================================================ PROFILE
-with profile_tab:
+if page == "Profile":
     query = st.text_input("Search a credit union by name", placeholder="e.g. BluCurrent")
     if not query:
         st.info("Type part of a credit union name to begin.")
@@ -546,7 +545,7 @@ with profile_tab:
                 st.dataframe(out, use_container_width=True, height=400)
 
 # ============================================================ COMPARE
-with compare_tab:
+elif page == "Compare":
     st.subheader("Compare credit unions side by side")
     picks = st.multiselect("Pick 2–5 credit unions", list(ALL_LABELS),
                            format_func=lambda n: ALL_LABELS[n], max_selections=5)
@@ -570,7 +569,7 @@ with compare_tab:
                 st.line_chart(series)
 
 # ============================================================ RANKINGS
-with rankings_tab:
+elif page == "Rankings":
     st.subheader("Screen & rank all credit unions")
     f1, f2, f3 = st.columns([2, 2, 1])
     all_states = sorted(s for s in mt.state.unique() if s)
@@ -605,7 +604,7 @@ with rankings_tab:
     st.dataframe(disp, use_container_width=True, hide_index=True, height=560)
 
 # ============================================================ MOVERS
-with movers_tab:
+elif page == "Movers":
     st.subheader("Biggest movers")
     st.caption(f"Growth basis: {growth_label.lower()}. "
                "Very large jumps often signal a merger/acquisition rather than organic growth.")
@@ -638,7 +637,7 @@ with movers_tab:
             st.dataframe(fmt_movers(lose), use_container_width=True, hide_index=True)
 
 # ============================================================ INDUSTRY
-with industry_tab:
+elif page == "Industry":
     st.subheader("Industry overview")
     if len(all_cycles) > 1:
         ind = industry_timeseries(sig)
