@@ -1,12 +1,17 @@
 name: Build NCUA data
 
+# Run from the Actions tab. In the "quarters" box you can enter:
+#   a single quarter:      2025-12
+#   several quarters:      2025-09 2025-12
+#   whole years (expand):  2024 2023
+#   a mix:                 2024 2025-12
 on:
   workflow_dispatch:
     inputs:
-      quarter:
-        description: "Quarter to ingest -- YYYY-MM, month must be 03, 06, 09, or 12"
+      quarters:
+        description: "Quarters and/or years, space-separated. A bare year expands to all 4 quarters."
         required: true
-        default: "2025-09"
+        default: "2025-12"
 
 permissions:
   contents: write
@@ -29,13 +34,31 @@ jobs:
       - name: Remove leftover raw NCUA .txt dumps (keeps requirements.txt)
         run: find . -maxdepth 1 -name '*.txt' ! -name 'requirements.txt' -delete
 
-      - name: Run the ingest for the chosen quarter
-        run: python ingest_ncua.py --quarter "${{ inputs.quarter }}"
+      - name: Run the ingest for the chosen quarters/years
+        shell: bash
+        env:
+          QUARTERS: ${{ inputs.quarters }}
+        run: |
+          quarters=""
+          for tok in $QUARTERS; do
+            if [[ "$tok" =~ ^[0-9]{4}$ ]]; then
+              for m in 03 06 09 12; do quarters="$quarters $tok-$m"; done
+            else
+              quarters="$quarters $tok"
+            fi
+          done
+          args=""
+          for q in $quarters; do args="$args --quarter $q"; done
+          echo "Ingesting:$quarters"
+          python ingest_ncua.py $args
 
       - name: Commit the generated data back to the repo
+        shell: bash
+        env:
+          QUARTERS: ${{ inputs.quarters }}
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -A
-          git diff --cached --quiet || git commit -m "Add NCUA data for ${{ inputs.quarter }}"
+          git diff --cached --quiet || git commit -m "Add NCUA data: $QUARTERS"
           git push
