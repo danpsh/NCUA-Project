@@ -1,20 +1,25 @@
 """
-NCUA Call Report Explorer (Streamlit + DuckDB over Parquet)
-===========================================================
+NCUA Call Report Explorer  (Streamlit + DuckDB over Parquet)
+============================================================
 
-Reads the partitioned Parquet dataset produced by ingest_ncua.py and presents,
-for any credit union, a panel of named headline metrics plus the Efficiency
-Ratio (with its components), and a browse view of every underlying table with
-readable account names.
+Two tabs:
+  Profile  -- search a credit union, see a full FPR-style scorecard, and
+              benchmark it against a peer group (percentile ranks).
+  Rankings -- screen/sort all credit unions by any metric, filtered by state
+              and asset size.
 
-NOTE on account codes: NCUA's files are inconsistent about casing -- most
-columns are ACCT_115 but some are Acct_661A. Every code lookup here is
-case-insensitive (everything is upper-cased before matching).
+All metrics are computed across every CU at once in metrics_table() and cached.
+NCUA mixes column casing (ACCT_115 vs Acct_661A); DuckDB matches identifiers
+case-insensitively, so the SQL just uses one consistent ACCT_ form.
+
+YTD income items are annualized by 12/quarter-month so ROA/ROE/NIM/NCO are
+comparable across quarters. Ratios use period-end balances (labeled as such).
 """
 
 from pathlib import Path
 
 import duckdb
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -22,55 +27,81 @@ st.set_page_config(page_title="NCUA Call Report Explorer", layout="wide")
 
 DATA_DIR = Path("data")
 SKIP_TABLES = {"Readme", "Report1"}
-META_COLS = {"CU_NUMBER", "CYCLE_DATE", "JOIN_NUMBER", "UPDATE_DATE", "CYCLE"}
+BROWSE_SKIP = SKIP_TABLES | {"AcctDesc", "FOICUDES", "Acct_DescTradeNames"}
 
-# Headline figures: (label, account-code-without-prefix). Codes are unique across
-# the FS220 tables, so we don't need to know which table each lives in.
-HEADLINE = [
-    ("Total Assets", "010"),
-    ("Loans & Leases", "025B"),
-    ("Shares & Deposits", "018"),
-    ("Total Net Worth", "997"),
-    ("Net Income", "661A"),
+# Metric registry: key, label, format, direction ("high"/"low" = better, None = level)
+METRICS = [
+    ("assets", "Total Assets", "money", None),
+    ("loans", "Loans & Leases", "money", None),
+    ("shares", "Shares & Deposits", "money", None),
+    ("net_worth", "Net Worth", "money", None),
+    ("net_income", "Net Income (YTD)", "money", None),
+    ("members", "Members", "int", None),
+    ("roa", "ROA", "pct", "high"),
+    ("roe", "ROE", "pct", "high"),
+    ("nim", "Net Interest Margin", "pct", "high"),
+    ("efficiency", "Efficiency Ratio", "pct", "low"),
+    ("nw_ratio", "Net Worth Ratio", "pct", "high"),
+    ("lts", "Loan-to-Share", "pct", None),
+    ("delinquency", "Delinquency Ratio", "pct", "low"),
+    ("nco", "Net Charge-Off Ratio", "pct", "low"),
 ]
+META = {k: (lbl, fmt, dirn) for k, lbl, fmt, dirn in METRICS}
 
-# Efficiency Ratio = Operating Expense / (Net Interest Income + Non-Interest Income)
-#   Net Interest Income = Total Interest Income (115) - Total Interest Expense (350)
-EFF = {
-    "int_income": "115",   # Total Interest Income
-    "int_expense": "350",  # Total Interest Expense
-    "non_int_income": "117",  # Total Non-Interest Income
-    "op_expense": "671",   # Total Non-Interest (Operating) Expense
-}
+BANDS = [
+    (0, 10e6, "< $10M"), (10e6, 50e6, "$10M–50M"), (50e6, 100e6, "$50M–100M"),
+    (100e6, 250e6, "$100M–250M"), (250e6, 500e6, "$250M–500M"),
+    (500e6, 1e9, "$500M–1B"), (1e9, float("inf"), "$1B+"),
+]
 
 
 @st.cache_resource
-def get_con() -> duckdb.DuckDBPyConnection:
+def get_con():
     return duckdb.connect()
 
 
 con = get_con()
 
 
-def glob_for(table: str) -> str:
+def glob_for(table):
     return f"{DATA_DIR.as_posix()}/{table}/**/*.parquet"
 
 
-def available_tables() -> list[str]:
+def available_tables():
     if not DATA_DIR.exists():
         return []
-    return sorted(
-        p.name for p in DATA_DIR.iterdir()
-        if p.is_dir() and any(p.glob("**/*.parquet"))
-    )
+    return sorted(p.name for p in DATA_DIR.iterdir()
+                  if p.is_dir() and any(p.glob("**/*.parquet")))
 
 
-def fs_tables(tables: list[str]) -> list[str]:
-    return [t for t in tables if t.upper().startswith("FS220")]
+def band_of(assets):
+    if assets is None or pd.isna(assets):
+        return "Unknown"
+    for lo, hi, lbl in BANDS:
+        if lo <= assets < hi:
+            return lbl
+    return "Unknown"
+
+
+def money(x):
+    return f"${x:,.0f}" if isinstance(x, (int, float)) and not pd.isna(x) else "—"
+
+
+def intfmt(x):
+    return f"{x:,.0f}" if isinstance(x, (int, float)) and not pd.isna(x) else "—"
+
+
+def pct(x):
+    return f"{x:.1f}%" if isinstance(x, (int, float)) and not pd.isna(x) else "—"
+
+
+def fmt(key, x):
+    f = META[key][1]
+    return money(x) if f == "money" else intfmt(x) if f == "int" else pct(x)
 
 
 @st.cache_data(show_spinner=False)
-def cycles() -> list[str]:
+def cycles():
     rows = con.execute(
         f"SELECT DISTINCT cycle FROM read_parquet('{glob_for('FOICU')}', "
         "hive_partitioning=true) ORDER BY cycle DESC"
@@ -79,8 +110,7 @@ def cycles() -> list[str]:
 
 
 @st.cache_data(show_spinner=False)
-def acct_names() -> dict:
-    """Upper-cased account code -> short readable name (AcctName)."""
+def acct_names():
     try:
         df = con.execute(
             f"SELECT Account, AcctName FROM read_parquet('{glob_for('AcctDesc')}', "
@@ -91,157 +121,205 @@ def acct_names() -> dict:
         return {}
 
 
-@st.cache_data(show_spinner=False)
-def cu_account_values(cu: str, cycle: str, fs_table_list: tuple) -> dict:
-    """Every account value for one CU across all FS220 tables, keyed UPPER-case."""
-    vals: dict = {}
-    for t in fs_table_list:
-        try:
-            df = con.execute(
-                f"SELECT * FROM read_parquet('{glob_for(t)}', hive_partitioning=true) "
-                "WHERE cycle = ? AND CU_NUMBER = ?",
-                [cycle, cu],
-            ).df()
-        except Exception:
-            continue
-        if df.empty:
-            continue
-        row = df.iloc[0]
-        for c in df.columns:
-            if c.upper() in META_COLS:
-                continue
-            vals[c.upper()] = row[c]
-    return vals
+@st.cache_data(show_spinner="Computing metrics for all credit unions…")
+def metrics_table(cycle):
+    annualize = 12 / int(cycle[-2:])
+    d = con.execute(f"""
+      SELECT o.CU_NUMBER AS cu, o.CU_NAME AS cu_name, COALESCE(o.STATE, '') AS state,
+        TRY_CAST(f.ACCT_010  AS DOUBLE) AS assets,
+        TRY_CAST(f.ACCT_025B AS DOUBLE) AS loans,
+        TRY_CAST(f.ACCT_018  AS DOUBLE) AS shares,
+        TRY_CAST(f.ACCT_671  AS DOUBLE) AS opex,
+        TRY_CAST(f.ACCT_083  AS DOUBLE) AS members,
+        TRY_CAST(f.ACCT_550  AS DOUBLE) AS chargeoffs,
+        TRY_CAST(f.ACCT_551  AS DOUBLE) AS recoveries,
+        TRY_CAST(f.ACCT_041B AS DOUBLE) AS delinquent,
+        TRY_CAST(a.ACCT_997  AS DOUBLE) AS net_worth,
+        TRY_CAST(a.ACCT_661A AS DOUBLE) AS net_income,
+        TRY_CAST(a.ACCT_115  AS DOUBLE) AS int_income,
+        TRY_CAST(a.ACCT_350  AS DOUBLE) AS int_expense,
+        TRY_CAST(a.ACCT_117  AS DOUBLE) AS non_int_income
+      FROM read_parquet('{glob_for('FOICU')}',  hive_partitioning=true) o
+      JOIN read_parquet('{glob_for('FS220')}',  hive_partitioning=true) f
+        ON o.CU_NUMBER=f.CU_NUMBER AND o.cycle=f.cycle
+      JOIN read_parquet('{glob_for('FS220A')}', hive_partitioning=true) a
+        ON o.CU_NUMBER=a.CU_NUMBER AND o.cycle=a.cycle
+      WHERE o.cycle = ?
+    """, [cycle]).df()
+
+    nii = d.int_income - d.int_expense
+
+    def ratio(num, den):
+        return np.where(den.notna() & (den != 0), num / den * 100, np.nan)
+
+    d["roa"] = ratio(d.net_income * annualize, d.assets)
+    d["roe"] = ratio(d.net_income * annualize, d.net_worth)
+    d["nim"] = ratio(nii * annualize, d.assets)
+    d["efficiency"] = ratio(d.opex, nii + d.non_int_income)
+    d["nw_ratio"] = ratio(d.net_worth, d.assets)
+    d["lts"] = ratio(d.loans, d.shares)
+    d["delinquency"] = ratio(d.delinquent, d.loans)
+    d["nco"] = ratio((d.chargeoffs - d.recoveries) * annualize, d.loans)
+    d["band"] = d.assets.apply(band_of)
+    return d
 
 
-def num(vals: dict, code: str):
-    v = vals.get(f"ACCT_{code}".upper())
-    try:
-        return float(v)
-    except (ValueError, TypeError):
-        return None
-
-
-def money(x) -> str:
-    return f"${x:,.0f}" if isinstance(x, (int, float)) else "—"
-
-
-def pct(x) -> str:
-    return f"{x:.1f}%" if isinstance(x, (int, float)) else "—"
-
-
-# ----------------------------------------------------------------------------- UI
+# ---------------------------------------------------------------------------- UI
 
 st.title("NCUA Call Report Explorer")
 
 tables = available_tables()
 if "FOICU" not in tables:
-    st.error(
-        "No data found under ./data. Run `python ingest_ncua.py --quarter 2025-09` "
-        "(or the GitHub Action), then make sure the data/ folder is committed."
-    )
+    st.error("No data under ./data. Run the ingest (or GitHub Action) and commit data/.")
     st.stop()
 
 cycle = st.sidebar.selectbox("Quarter", cycles())
+mt = metrics_table(cycle)
 
-query = st.text_input("Search a credit union by name", placeholder="e.g. BluCurrent")
-if not query:
-    st.info("Type part of a credit union name to begin.")
-    st.stop()
+profile_tab, rankings_tab = st.tabs(["Profile", "Rankings"])
 
-matches = con.execute(
-    f"SELECT * FROM read_parquet('{glob_for('FOICU')}', hive_partitioning=true) "
-    "WHERE cycle = ? AND CU_NAME ILIKE ? ORDER BY CU_NAME LIMIT 300",
-    [cycle, f"%{query}%"],
-).df()
+# ============================================================ PROFILE
+with profile_tab:
+    query = st.text_input("Search a credit union by name", placeholder="e.g. BluCurrent")
+    if not query:
+        st.info("Type part of a credit union name to begin.")
+    else:
+        hits = mt[mt.cu_name.str.contains(query, case=False, na=False)].head(300)
+        st.caption(f"{len(hits)} match(es) in {cycle}")
+        if not hits.empty:
+            labels = {r.cu: f"{r.cu_name}  (#{r.cu}, {r.state})" for r in hits.itertuples()}
+            cu = st.selectbox("Select a credit union", list(labels),
+                              format_func=lambda n: labels[n])
+            row = mt[mt.cu == cu].iloc[0]
+            st.subheader(labels[cu])
+            st.caption(f"Asset peer group: {row.band}")
 
-st.caption(f"{len(matches)} match(es) in {cycle}")
-if matches.empty:
-    st.stop()
+            # --- scorecard ---
+            c1 = st.columns(5)
+            for col, key in zip(c1, ["assets", "loans", "shares", "net_worth", "net_income"]):
+                col.metric(META[key][0], fmt(key, row[key]))
+            c2 = st.columns(5)
+            for col, key in zip(c2, ["roa", "roe", "nim", "nw_ratio", "members"]):
+                col.metric(META[key][0], fmt(key, row[key]))
+            c3 = st.columns(4)
+            for col, key in zip(c3, ["efficiency", "lts", "delinquency", "nco"]):
+                col.metric(META[key][0], fmt(key, row[key]))
 
+            with st.expander("Efficiency Ratio breakdown"):
+                nii = row.int_income - row.int_expense
+                rev = nii + row.non_int_income
+                bd = pd.DataFrame([
+                    ("Total Interest Income", money(row.int_income)),
+                    ("− Total Interest Expense", money(row.int_expense)),
+                    ("= Net Interest Income", money(nii)),
+                    ("+ Non-Interest Income", money(row.non_int_income)),
+                    ("= Revenue (denominator)", money(rev)),
+                    ("Operating Expense (numerator)", money(row.opex)),
+                    ("Efficiency Ratio", pct(row.efficiency)),
+                ], columns=["Component", "Value"])
+                st.dataframe(bd, use_container_width=True, hide_index=True)
 
-def label_for(r: pd.Series) -> str:
-    state = r.get("STATE") or r.get("CU_STATE") or ""
-    tail = f"#{r['CU_NUMBER']}" + (f", {state}" if state else "")
-    return f"{r.get('CU_NAME', '')}  ({tail})"
+            # --- peer benchmarking ---
+            st.subheader("Peer benchmarking")
+            basis = st.radio(
+                "Compare against",
+                ["Similar asset size", f"Same state ({row.state})",
+                 "Same state + asset size", "All credit unions"],
+                horizontal=True,
+            )
+            peers = mt
+            if "asset size" in basis and "state" not in basis:
+                peers = mt[mt.band == row.band]
+            elif basis.startswith("Same state ("):
+                peers = mt[mt.state == row.state]
+            elif "state + asset" in basis:
+                peers = mt[(mt.state == row.state) & (mt.band == row.band)]
+            st.caption(f"Peer group: {len(peers):,} credit unions")
 
+            ratio_keys = ["roa", "roe", "nim", "efficiency", "nw_ratio", "lts",
+                          "delinquency", "nco"]
+            bench = []
+            for key in ratio_keys:
+                lbl, _, dirn = META[key]
+                v = row[key]
+                series = peers[key].dropna()
+                if pd.isna(v) or series.empty:
+                    bench.append((lbl, fmt(key, v), "—", "—"))
+                    continue
+                med = series.median()
+                if dirn == "high":
+                    better = (series < v).mean() * 100
+                    rank = f"better than {better:.0f}% of peers"
+                elif dirn == "low":
+                    better = (series > v).mean() * 100
+                    rank = f"better than {better:.0f}% of peers"
+                else:
+                    p = (series < v).mean() * 100
+                    rank = f"{p:.0f}th percentile"
+                bench.append((lbl, fmt(key, v), fmt(key, med), rank))
+            st.dataframe(
+                pd.DataFrame(bench, columns=["Metric", "This CU", "Peer median", "Standing"]),
+                use_container_width=True, hide_index=True,
+            )
 
-labels = {r["CU_NUMBER"]: label_for(r) for _, r in matches.iterrows()}
-cu = st.selectbox("Select a credit union", list(labels), format_func=lambda n: labels[n])
+            # --- identity + raw browse ---
+            with st.expander("Identity / FOICU fields"):
+                foicu = con.execute(
+                    f"SELECT * FROM read_parquet('{glob_for('FOICU')}', hive_partitioning=true) "
+                    "WHERE cycle = ? AND CU_NUMBER = ?", [cycle, cu]).df()
+                st.dataframe(foicu.T, use_container_width=True)
 
-st.subheader(labels[cu])
+            st.subheader("Browse a data table")
+            table = st.selectbox("Table", [t for t in tables if t not in BROWSE_SKIP])
+            try:
+                raw = con.execute(
+                    f"SELECT * FROM read_parquet('{glob_for(table)}', hive_partitioning=true) "
+                    "WHERE cycle = ? AND CU_NUMBER = ?", [cycle, cu]).df()
+            except Exception as e:
+                st.warning(f"Could not read {table}: {e}")
+                raw = pd.DataFrame()
+            if raw.empty:
+                st.write("No rows for this credit union in this table.")
+            else:
+                out = raw.T.reset_index()
+                out.columns = ["account"] + [f"value{i}" if i else "value"
+                                             for i in range(out.shape[1] - 1)]
+                out.insert(1, "description",
+                           out["account"].str.upper().map(acct_names()).fillna(""))
+                st.dataframe(out, use_container_width=True, height=500)
 
-# --- Key metrics --------------------------------------------------------------
-vals = cu_account_values(cu, cycle, tuple(fs_tables(tables)))
+# ============================================================ RANKINGS
+with rankings_tab:
+    st.subheader("Screen & rank all credit unions")
+    f1, f2, f3 = st.columns([2, 2, 1])
+    all_states = sorted(s for s in mt.state.unique() if s)
+    sel_states = f1.multiselect("State(s)", all_states, default=[])
+    sel_bands = f2.multiselect("Asset size", [b[2] for b in BANDS], default=[])
+    top_n = f3.number_input("Show top", min_value=10, max_value=2000, value=100, step=10)
 
-cols = st.columns(len(HEADLINE))
-for col, (label, code) in zip(cols, HEADLINE):
-    col.metric(label, money(num(vals, code)))
+    rankable = [k for k, _, _, _ in METRICS]
+    g1, g2 = st.columns([2, 1])
+    rank_key = g1.selectbox("Rank by", rankable,
+                            format_func=lambda k: META[k][0], index=rankable.index("assets"))
+    default_desc = META[rank_key][2] != "low"  # low-is-better -> ascending
+    order = g2.radio("Order", ["Top (high→low)", "Bottom (low→high)"],
+                     index=0 if default_desc else 1, horizontal=True)
 
-int_inc = num(vals, EFF["int_income"])
-int_exp = num(vals, EFF["int_expense"])
-non_int = num(vals, EFF["non_int_income"])
-op_exp = num(vals, EFF["op_expense"])
-nii = (int_inc - int_exp) if None not in (int_inc, int_exp) else None
-denom = (nii + non_int) if None not in (nii, non_int) else None
-eff = (op_exp / denom * 100) if (op_exp is not None and denom) else None
+    view = mt.copy()
+    if sel_states:
+        view = view[view.state.isin(sel_states)]
+    if sel_bands:
+        view = view[view.band.isin(sel_bands)]
+    view = view.dropna(subset=[rank_key])
+    view = view.sort_values(rank_key, ascending=(order.startswith("Bottom"))).head(int(top_n))
 
-assets = num(vals, "010")
-nw = num(vals, "997")
-loans = num(vals, "025B")
-shares = num(vals, "018")
-nw_ratio = (nw / assets * 100) if (nw is not None and assets) else None
-ls_ratio = (loans / shares * 100) if (loans is not None and shares) else None
-
-r2 = st.columns(3)
-r2[0].metric("Efficiency Ratio", pct(eff), help="Operating Expense / (Net Interest Income + Non-Interest Income). Lower is better.")
-r2[1].metric("Net Worth Ratio", pct(nw_ratio), help="Total Net Worth / Total Assets.")
-r2[2].metric("Loan-to-Share Ratio", pct(ls_ratio), help="Loans & Leases / Shares & Deposits.")
-
-with st.expander("Efficiency Ratio breakdown"):
-    breakdown = pd.DataFrame(
-        [
-            ("Total Interest Income", money(int_inc)),
-            ("− Total Interest Expense", money(int_exp)),
-            ("= Net Interest Income", money(nii)),
-            ("+ Non-Interest Income", money(non_int)),
-            ("= Revenue (denominator)", money(denom)),
-            ("Operating Expense (numerator)", money(op_exp)),
-            ("Efficiency Ratio", pct(eff)),
-        ],
-        columns=["Component", "Value"],
-    )
-    st.dataframe(breakdown, use_container_width=True, hide_index=True)
-
-st.divider()
-
-# --- Identity + raw table browser --------------------------------------------
-with st.expander("Identity / FOICU fields"):
-    foicu_row = con.execute(
-        f"SELECT * FROM read_parquet('{glob_for('FOICU')}', hive_partitioning=true) "
-        "WHERE cycle = ? AND CU_NUMBER = ?",
-        [cycle, cu],
-    ).df()
-    st.dataframe(foicu_row.T, use_container_width=True)
-
-st.subheader("Browse a data table")
-table = st.selectbox("Table", [t for t in tables if t not in SKIP_TABLES])
-
-try:
-    row = con.execute(
-        f"SELECT * FROM read_parquet('{glob_for(table)}', hive_partitioning=true) "
-        "WHERE cycle = ? AND CU_NUMBER = ?",
-        [cycle, cu],
-    ).df()
-except Exception as e:
-    st.warning(f"Could not read {table}: {e}")
-    row = pd.DataFrame()
-
-if row.empty:
-    st.write("No rows for this credit union in this table.")
-else:
-    out = row.T.reset_index()
-    out.columns = ["account"] + [f"value{i}" if i else "value" for i in range(out.shape[1] - 1)]
-    names = acct_names()
-    out.insert(1, "description", out["account"].str.upper().map(names).fillna(""))
-    st.dataframe(out, use_container_width=True, height=600)
+    show_keys = ["assets", "net_worth", "roa", "efficiency", "nw_ratio",
+                 "delinquency", "lts"]
+    if rank_key not in show_keys:
+        show_keys.insert(0, rank_key)
+    disp = pd.DataFrame({"Credit Union": view.cu_name.values, "State": view.state.values})
+    for k in show_keys:
+        disp[META[k][0]] = [fmt(k, x) for x in view[k].values]
+    disp.insert(0, "Rank", range(1, len(disp) + 1))
+    st.caption(f"{len(view):,} credit unions shown (of {len(mt):,} total)")
+    st.dataframe(disp, use_container_width=True, hide_index=True, height=600)
