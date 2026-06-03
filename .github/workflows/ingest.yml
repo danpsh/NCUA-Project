@@ -16,6 +16,11 @@ on:
 permissions:
   contents: write
 
+# Only one ingest run at a time, so two runs can't race to push to main.
+concurrency:
+  group: build-ncua-data
+  cancel-in-progress: false
+
 jobs:
   ingest:
     runs-on: ubuntu-latest
@@ -52,7 +57,7 @@ jobs:
           echo "Ingesting:$quarters"
           python ingest_ncua.py $args
 
-      - name: Commit the generated data back to the repo
+      - name: Commit and push the generated data
         shell: bash
         env:
           QUARTERS: ${{ inputs.quarters }}
@@ -60,5 +65,19 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -A
-          git diff --cached --quiet || git commit -m "Add NCUA data: $QUARTERS"
-          git push
+          if git diff --cached --quiet; then
+            echo "Nothing new to commit."
+            exit 0
+          fi
+          git commit -m "Add NCUA data: $QUARTERS"
+          # Pull any concurrent changes, then push; retry a few times to be safe.
+          for i in 1 2 3 4 5; do
+            if git pull --rebase origin main && git push origin main; then
+              echo "Pushed successfully."
+              exit 0
+            fi
+            echo "Push attempt $i failed; retrying in 5s..."
+            sleep 5
+          done
+          echo "Push failed after retries." >&2
+          exit 1
