@@ -4,3 +4,4 @@ pandas
 pyarrow
 requests
 openpyxl
+reportlab
