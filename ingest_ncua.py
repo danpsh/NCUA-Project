@@ -93,6 +93,32 @@ def sanitize_table_name(filename: str) -> str:
     return name
 
 
+# NCUA changed file names/casing across years (e.g. foicu.txt -> FOICU.txt,
+# "ATM Locations.txt" -> ATM.txt). Map every variant to ONE canonical folder so
+# the same table doesn't split across data/FS220/ and data/fs220/.
+_CANONICAL_ALIASES = {
+    "ATM": "ATM_Locations", "ATMLOCATIONS": "ATM_Locations",
+    "ATM_LOCATIONS": "ATM_Locations",
+    "ACCTDESC": "AcctDesc",
+    "TRADENAMES": "TradeNames",
+    "ACCT_DESCTRADENAMES": "Acct_DescTradeNames",
+    "ACCT_DESCGRANTS": "Acct_DescGrants",
+    "ACCT_DESCCUSO": "Acct_DescCUSO",
+    "GRANTS": "Grants",
+    "CREDIT_UNION_BRANCH_INFORMATION": "Credit_Union_Branch_Information",
+}
+
+
+def canonical_table(filename: str) -> str:
+    """Stable folder name for a table, regardless of the year's casing/naming."""
+    s = sanitize_table_name(filename)
+    key = s.upper()
+    # FS220-family and the FOICU tables -> uppercase canonical (foicu->FOICU, fs220a->FS220A)
+    if key.startswith("FS220") or key in ("FOICU", "FOICUDES"):
+        return key
+    return _CANONICAL_ALIASES.get(key, s)
+
+
 def read_ncua_txt(raw: bytes) -> pd.DataFrame:
     """NCUA tables are comma-delimited text with a header row.
 
@@ -138,7 +164,7 @@ def load_quarter_from_zip(zip_path: Path, quarter: str) -> dict[str, pd.DataFram
                 print(f"    (skipping {member}: not parseable as CSV -- {exc})")
                 continue
             df.insert(0, "cycle", quarter)
-            name = sanitize_table_name(member)
+            name = canonical_table(member)
             # If a name collides (rare), merge rows rather than drop.
             if name in tables:
                 tables[name] = pd.concat([tables[name], df], ignore_index=True)
