@@ -46,10 +46,10 @@ METRICS = [
     ("lts", "Loan-to-Share", "pct", None),
     ("delinquency", "Delinquency Ratio", "pct", "low"),
     ("nco", "Net Charge-Off Ratio", "pct", "low"),
-    ("assets_growth", "Asset Growth (ann.)", "pct", "high"),
-    ("members_growth", "Member Growth (ann.)", "pct", "high"),
-    ("loans_growth", "Loan Growth (ann.)", "pct", "high"),
-    ("shares_growth", "Share Growth (ann.)", "pct", "high"),
+    ("assets_growth", "Asset Growth", "pct", "high"),
+    ("members_growth", "Member Growth", "pct", "high"),
+    ("loans_growth", "Loan Growth", "pct", "high"),
+    ("shares_growth", "Share Growth", "pct", "high"),
 ]
 META = {k: (lbl, fmt, dirn) for k, lbl, fmt, dirn in METRICS}
 GROWTH_KEYS = ["assets_growth", "members_growth", "loans_growth", "shares_growth"]
@@ -128,6 +128,13 @@ def prior_cycle(cycle):
     return None
 
 
+def yoy_cycle(cycle):
+    """Same quarter one year earlier, if present in the data."""
+    y, m = cycle.split("-")
+    cand = f"{int(y) - 1}-{m}"
+    return cand if cand in cycles() else None
+
+
 @st.cache_data(show_spinner=False)
 def acct_names():
     try:
@@ -183,27 +190,30 @@ def metrics_table(cycle):
 
 
 @st.cache_data(show_spinner=False)
-def growth_for(cycle):
+def growth_for(cycle, basis):
     cols = ["assets", "members", "loans", "shares"]
     cur = metrics_table(cycle)[["cu"] + cols].copy()
-    prior = prior_cycle(cycle)
+    if basis == "YoY":
+        prior, factor = yoy_cycle(cycle), 1.0
+    else:  # QoQ annualized
+        prior = prior_cycle(cycle)
+        factor = (4 / (qidx(cycle) - qidx(prior))) if prior else 1.0
     if prior is None:
         for c in cols:
             cur[f"{c}_growth"] = np.nan
         return cur[["cu"] + [f"{c}_growth" for c in cols]]
-    qd = qidx(cycle) - qidx(prior)
     p = (metrics_table(prior)[["cu"] + cols]
          .rename(columns={c: f"{c}_p" for c in cols}))
     m = cur.merge(p, on="cu", how="left")
     for c in cols:
         base = m[f"{c}_p"]
-        m[f"{c}_growth"] = np.where(base > 0, (m[c] / base - 1) * (4 / qd) * 100, np.nan)
+        m[f"{c}_growth"] = np.where(base > 0, (m[c] / base - 1) * factor * 100, np.nan)
     return m[["cu"] + [f"{c}_growth" for c in cols]]
 
 
 @st.cache_data(show_spinner=False)
-def enriched_table(cycle):
-    return metrics_table(cycle).merge(growth_for(cycle), on="cu", how="left")
+def enriched_table(cycle, basis):
+    return metrics_table(cycle).merge(growth_for(cycle, basis), on="cu", how="left")
 
 
 @st.cache_data(show_spinner=False)
@@ -230,7 +240,10 @@ if "FOICU" not in tables:
 
 all_cycles = cycles()
 cycle = st.sidebar.selectbox("Quarter", all_cycles)
-mt = enriched_table(cycle)
+growth_label = st.sidebar.selectbox(
+    "Growth basis", ["Year-over-year", "Quarter-over-quarter (annualized)"])
+basis = "YoY" if growth_label.startswith("Year") else "QoQ"
+mt = enriched_table(cycle, basis)
 
 profile_tab, rankings_tab = st.tabs(["Profile", "Rankings"])
 
@@ -262,6 +275,7 @@ with profile_tab:
             c4 = st.columns(4)
             for col, key in zip(c4, GROWTH_KEYS):
                 col.metric(META[key][0], fmt(key, row[key]))
+            st.caption(f"Growth basis: {growth_label.lower()}")
 
             with st.expander("Efficiency Ratio breakdown"):
                 nii = row.int_income - row.int_expense
