@@ -757,13 +757,17 @@ if page == "Profile":
                 st.dataframe(bd, use_container_width=True, hide_index=True)
 
             if len(all_cycles) > 1:
-                st.subheader("Trends across quarters")
+                st.subheader("Trends")
                 ts = cu_timeseries(cu, sig)
                 trend_opts = [k for k, _, _, _ in METRICS if not k.endswith("_growth")]
-                chosen = st.multiselect(
+                tc1, tc2 = st.columns([1, 3])
+                tspan = tc1.radio("Period", ["Quarters", "Years"], horizontal=True)
+                chosen = tc2.multiselect(
                     "Metrics to chart", trend_opts,
                     default=["assets", "roa", "efficiency", "delinquency"],
                     format_func=lambda k: META[k][0])
+                if tspan == "Years" and not ts.empty:
+                    ts = ts[[str(i).endswith("-12") for i in ts.index]]
                 if not ts.empty and chosen:
                     grid = st.columns(2)
                     for i, key in enumerate(chosen):
@@ -945,6 +949,19 @@ elif page == "Rankings":
         disp["Merger"] = [f"\u2713 \u00d7{acq[c]}" if c in acq else "" for c in view.cu.values]
     disp.insert(0, "Rank", range(1, len(disp) + 1))
     st.caption(f"{len(view):,} credit unions shown (of {len(mt):,} total)")
+    if not view.empty:
+        topn = view.head(min(int(top_n), 15))
+        cdf = pd.DataFrame({"name": topn.cu_name.values, "value": topn[rank_key].values})
+        try:
+            import altair as alt
+            chart = alt.Chart(cdf).mark_bar(color="#2563eb").encode(
+                x=alt.X("value:Q", title=META[rank_key][0]),
+                y=alt.Y("name:N", sort="-x", title=None),
+                tooltip=[alt.Tooltip("name:N", title="Credit Union"),
+                         alt.Tooltip("value:Q", title=META[rank_key][0], format=",.2f")])
+            st.altair_chart(chart, use_container_width=True)
+        except Exception:
+            st.bar_chart(cdf.set_index("name")["value"])
     st.dataframe(disp, use_container_width=True, hide_index=True, height=560)
 
 # ============================================================ MOVERS
