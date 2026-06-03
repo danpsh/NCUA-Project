@@ -568,6 +568,16 @@ def acquirers_in_window(cycle, basis, cycle_sig):
     return mg[mg.cycle.isin(win)].continuing_charter.value_counts().to_dict()
 
 
+@st.cache_data(show_spinner=False)
+def acquirers_trailing(cycle, quarters, cycle_sig):
+    """Charters that absorbed a CU in the last `quarters` report quarters up to cycle."""
+    mg = merger_table(cycle_sig)
+    if mg.empty:
+        return {}
+    rep = [c for c in sorted(mg.cycle.unique()) if c <= cycle][-quarters:]
+    return mg[mg.cycle.isin(rep)].continuing_charter.value_counts().to_dict()
+
+
 def compute_flags(row, mt):
     flags = []
     if pd.notna(row.nw_ratio):
@@ -881,10 +891,10 @@ elif page == "Rankings":
     default_desc = META[rank_key][2] != "low"
     order = g2.radio("Order", ["Top (high→low)", "Bottom (low→high)"],
                      index=0 if default_desc else 1, horizontal=True)
-    acq = acquirers_in_window(cycle, basis, sig)
+    acq = acquirers_trailing(cycle, 4, sig)
     excl = False
     if acq:
-        excl = st.checkbox("Exclude credit unions that absorbed another this period "
+        excl = st.checkbox("Exclude credit unions that absorbed another in the last 4 quarters "
                            "(merger-driven results)", value=False)
     if rank_key in GROWTH_KEYS and not excl:
         st.caption("Heads-up: extreme growth usually reflects a merger/acquisition — "
