@@ -1,7 +1,7 @@
 name: Ingest mergers
 
-# Downloads NCUA Insurance Report of Activity ZIPs and writes merger records to
-# data/MERGERS/. Run this for the same quarters you ingested call-report data for.
+# Downloads NCUA Insurance Report of Activity ZIPs and writes merger + charter-
+# conversion records to data/MERGERS/ and data/CONVERSIONS/. Run this for the same quarters you ingested call-report data for.
 # Reports are quarterly from 2018-09 onward (month tokens march/june/sept/dec).
 on:
   workflow_dispatch:
@@ -42,12 +42,12 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/MERGERS
+          git add data/MERGERS data/CONVERSIONS
           if git diff --cached --quiet; then
             echo "No merger data changes to commit."
             exit 0
           fi
-          git commit -m "Ingest merger data: ${{ inputs.quarters }}"
+          git commit -m "Ingest mergers + conversions: ${{ inputs.quarters }}"
           for i in 1 2 3 4 5; do
             git pull --rebase origin main && git push origin HEAD:main && break
             echo "push attempt $i failed; retrying after rebase..."
