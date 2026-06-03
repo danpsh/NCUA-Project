@@ -525,24 +525,24 @@ if page == "Profile":
                     "WHERE cycle = ? AND CU_NUMBER = ?", [cycle, cu]).df()
                 st.dataframe(foicu.T, use_container_width=True)
 
-            st.subheader("Browse a data table")
-            table = st.selectbox("Table", [t for t in tables if t not in BROWSE_SKIP])
-            try:
-                raw = con.execute(
-                    f"SELECT * FROM read_parquet('{glob_for(table)}', hive_partitioning=true, union_by_name=true) "
-                    "WHERE cycle = ? AND CU_NUMBER = ?", [cycle, cu]).df()
-            except Exception as e:
-                st.warning(f"Could not read {table}: {e}")
-                raw = pd.DataFrame()
-            if raw.empty:
-                st.write("No rows for this credit union in this table.")
-            else:
-                out = raw.T.reset_index()
-                out.columns = ["account"] + [f"value{i}" if i else "value"
-                                             for i in range(out.shape[1] - 1)]
-                out.insert(1, "description",
-                           out["account"].str.upper().map(acct_names()).fillna(""))
-                st.dataframe(out, use_container_width=True, height=400)
+            with st.expander("Raw call report tables (advanced)"):
+                table = st.selectbox("Table", [t for t in tables if t not in BROWSE_SKIP])
+                try:
+                    raw = con.execute(
+                        f"SELECT * FROM read_parquet('{glob_for(table)}', hive_partitioning=true, union_by_name=true) "
+                        "WHERE cycle = ? AND CU_NUMBER = ?", [cycle, cu]).df()
+                except Exception as e:
+                    st.warning(f"Could not read {table}: {e}")
+                    raw = pd.DataFrame()
+                if raw.empty:
+                    st.write("No rows for this credit union in this table.")
+                else:
+                    out = raw.T.reset_index()
+                    out.columns = ["account"] + [f"value{i}" if i else "value"
+                                                 for i in range(out.shape[1] - 1)]
+                    out.insert(1, "description",
+                               out["account"].str.upper().map(acct_names()).fillna(""))
+                    st.dataframe(out, use_container_width=True, height=400)
 
 # ============================================================ COMPARE
 elif page == "Compare":
