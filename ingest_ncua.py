@@ -55,6 +55,10 @@ URL_TEMPLATE = "https://ncua.gov/files/publications/analysis/call-report-data-{y
 
 VALID_MONTHS = {"03", "06", "09", "12"}
 
+# Files in the NCUA zip that are NOT comma-delimited data tables, so we skip them:
+# Readme.txt is the help file; Report1.txt is a record-count summary.
+SKIP_FILES = {"readme.txt", "report1.txt"}
+
 
 def build_url(quarter: str) -> str:
     """quarter is 'YYYY-MM' with MM in {03,06,09,12}."""
@@ -124,8 +128,15 @@ def load_quarter_from_zip(zip_path: Path, quarter: str) -> dict[str, pd.DataFram
         if not txt_members:
             raise RuntimeError(f"No .txt files found in {zip_path}")
         for member in sorted(txt_members):
+            if Path(member).name.lower() in SKIP_FILES:
+                print(f"    (skipping non-data file {member})")
+                continue
             raw = zf.read(member)
-            df = read_ncua_txt(raw)
+            try:
+                df = read_ncua_txt(raw)
+            except Exception as exc:  # noqa: BLE001 - never let one odd file kill the run
+                print(f"    (skipping {member}: not parseable as CSV -- {exc})")
+                continue
             df.insert(0, "cycle", quarter)
             name = sanitize_table_name(member)
             # If a name collides (rare), merge rows rather than drop.
