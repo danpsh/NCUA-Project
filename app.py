@@ -175,6 +175,33 @@ def fmt(key, x):
     return money(x) if f == "money" else intfmt(x) if f == "int" else pct(x)
 
 
+def _delta(key, cur, prev):
+    """(delta_text, delta_color) for st.metric, or (None, 'normal') when N/A."""
+    if prev is None or pd.isna(cur) or pd.isna(prev):
+        return None, "normal"
+    diff = cur - prev
+    f = META[key][1]
+    if f == "money":
+        a = abs(diff)
+        mag = (f"{a/1e9:.2f}B" if a >= 1e9 else f"{a/1e6:.1f}M" if a >= 1e6
+               else f"{a/1e3:.0f}K" if a >= 1e3 else f"{a:.0f}")
+        text = ("-$" if diff < 0 else "+$") + mag
+    elif f == "int":
+        text = f"{diff:+,.0f}"
+    elif f == "pct":
+        text = f"{diff:+.2f} pp"
+    else:
+        return None, "normal"
+    return text, ("inverse" if META[key][2] == "low" else "normal")
+
+
+def metric_card(col, key, row, prev_row):
+    """Render an st.metric with a prior-quarter delta (direction-aware coloring)."""
+    prev = prev_row[key] if (prev_row is not None and key in prev_row) else None
+    text, color = _delta(key, row[key], prev)
+    col.metric(META[key][0], fmt(key, row[key]), delta=text, delta_color=color)
+
+
 def to_excel_bytes(sheets):
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as xw:
@@ -751,6 +778,11 @@ if page == "Profile":
             cu = st.selectbox("Select a credit union", list(labels),
                               format_func=lambda n: labels[n])
             row = mt[mt.cu == cu].iloc[0]
+            ts = cu_timeseries(cu, sig)
+            prev_cy = prior_cycle(cycle)
+            prev_row = (ts.loc[prev_cy].to_dict()
+                        if (not ts.empty and prev_cy in ts.index) else None)
+
             st.subheader(labels[cu])
             st.caption(f"Asset peer group: {row.band}")
             _cv = conversions_table(sig)
@@ -762,17 +794,21 @@ if page == "Profile":
                                f"{str(_p.conv_type).title()} conversion ({_p.cycle}). "
                                "History below is linked across the change.")
 
-            # composite rating
-            rc = st.columns([1, 3])
-            rc[0].metric("Composite Score",
-                         f"{row.score:.0f}/100" if pd.notna(row.score) else "—")
-            with rc[1]:
-                st.markdown(
-                    f"<div style='font-size:2.2rem;line-height:1'>{stars_str(row.stars)}</div>",
-                    unsafe_allow_html=True)
-                st.caption(f"Growth/momentum score vs the {row.band} asset peer group — "
-                           "a z-score blend weighting growth and earnings most heavily. "
-                           "50 = peer average; higher means stronger momentum.")
+            # ---- KPI hero row -------------------------------------------------
+            h = st.columns(5)
+            for c, key in zip(h[:4], ["assets", "members", "nw_ratio", "roa"]):
+                metric_card(c, key, row, prev_row)
+            h[4].metric("Composite Score",
+                        f"{row.score:.0f}/100" if pd.notna(row.score) else "—",
+                        help="Growth/momentum z-score blend vs the asset-band peer "
+                             "group; 50 = peer average.")
+            st.markdown(
+                f"<div style='font-size:1.6rem;line-height:1.1'>{stars_str(row.stars)}"
+                "</div>", unsafe_allow_html=True)
+            cap = f"Momentum vs {row.band} peers — 50 = peer average."
+            if prev_row is not None:
+                cap += f"  ·  ▲▼ deltas vs prior quarter ({prev_cy})."
+            st.caption(cap)
             with st.expander("How this score is built"):
                 st.dataframe(score_breakdown(row), use_container_width=True, hide_index=True)
 
@@ -793,7 +829,7 @@ if page == "Profile":
                 st.markdown(f"**{title}**")
                 cols = st.columns(len(keys))
                 for col, key in zip(cols, keys):
-                    col.metric(META[key][0], fmt(key, row[key]))
+                    metric_card(col, key, row, prev_row)
 
             # one-click Excel export of this CU's scorecard
             sc = pd.DataFrame(
@@ -1009,12 +1045,18 @@ elif page == "Rankings":
             show_keys.insert(2, rank_key)
     disp = pd.DataFrame({"Credit Union": view.cu_name.values, "State": view.state.values})
     for k in show_keys:
-        disp[META[k][0]] = [fmt(k, x) for x in view[k].values]
+        if k == "score":
+            disp[META[k][0]] = view[k].round(0).values            # numeric → progress bar
+        else:
+            disp[META[k][0]] = [fmt(k, x) for x in view[k].values]
     if tagged and not excl:
         disp["Merger"] = [merger_tag(c, acq, inf) for c in view.cu.values]
     disp.insert(0, "Rank", range(1, len(disp) + 1))
     st.caption(f"{len(view):,} credit unions shown (of {len(mt):,} total)")
-    st.dataframe(disp, use_container_width=True, hide_index=True, height=560)
+    colcfg = {"Composite Score": st.column_config.ProgressColumn(
+        "Composite Score", min_value=0, max_value=100, format="%d")}
+    st.dataframe(disp, use_container_width=True, hide_index=True, height=560,
+                 column_config=colcfg)
 
 # ============================================================ MOVERS
 elif page == "Movers":
