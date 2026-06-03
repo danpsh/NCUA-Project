@@ -103,7 +103,7 @@ def intfmt(x):
 
 
 def pct(x):
-    return f"{x:.1f}%" if isinstance(x, (int, float)) and not pd.isna(x) else "—"
+    return f"{x:.2f}%" if isinstance(x, (int, float)) and not pd.isna(x) else "—"
 
 
 def fmt(key, x):
