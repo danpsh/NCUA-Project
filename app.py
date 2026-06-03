@@ -238,9 +238,44 @@ def metrics_table(cycle):
 
 
 @st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False)
+def conversions_table(cycle_sig):
+    if not (DATA_DIR / "CONVERSIONS").exists():
+        return pd.DataFrame()
+    df = con.execute(
+        f"SELECT * FROM read_parquet('{glob_for('CONVERSIONS')}', union_by_name=true)").df()
+    for c in ("old_charter", "new_charter"):
+        if c in df.columns:
+            df[c] = df[c].astype(str)
+    return df
+
+
+@st.cache_data(show_spinner=False)
+def charter_alias(cycle_sig):
+    """old charter -> newest charter id, following multi-step conversion chains."""
+    cv = conversions_table(cycle_sig)
+    if cv.empty or "old_charter" not in cv.columns:
+        return {}
+    direct = dict(zip(cv.old_charter, cv.new_charter))
+
+    def resolve(c):
+        seen = set()
+        while c in direct and c not in seen:
+            seen.add(c)
+            c = direct[c]
+        return c
+    return {old: resolve(old) for old in direct}
+
+
+def canon_charter(cu, alias):
+    return alias.get(cu, cu)
+
+
 def growth_for(cycle, basis, cycle_sig):
     cols = ["assets", "members", "loans", "shares"]
+    alias = charter_alias(cycle_sig)
     cur = metrics_table(cycle)[["cu"] + cols].copy()
+    cur["_k"] = cur.cu.map(lambda c: alias.get(c, c))   # canonical identity
     if basis == "YoY":
         prior, factor = yoy_cycle(cycle), 1.0
     else:
@@ -250,9 +285,11 @@ def growth_for(cycle, basis, cycle_sig):
         for c in cols:
             cur[f"{c}_growth"] = np.nan
         return cur[["cu"] + [f"{c}_growth" for c in cols]]
-    p = (metrics_table(prior)[["cu"] + cols]
-         .rename(columns={c: f"{c}_p" for c in cols}))
-    m = cur.merge(p, on="cu", how="left")
+    p = metrics_table(prior)[["cu"] + cols].copy()
+    p["_k"] = p.cu.map(lambda c: alias.get(c, c))
+    p = (p.rename(columns={c: f"{c}_p" for c in cols}).drop(columns=["cu"])
+         .groupby("_k", as_index=False).first())   # collapse any dup canonical keys
+    m = cur.merge(p, on="_k", how="left")
     for c in cols:
         base = m[f"{c}_p"]
         m[f"{c}_growth"] = np.where(base > 0, (m[c] / base - 1) * factor * 100, np.nan)
@@ -284,10 +321,14 @@ def enriched_table(cycle, basis, cycle_sig):
 
 @st.cache_data(show_spinner=False)
 def cu_timeseries(cu, cycle_sig):
+    alias = charter_alias(cycle_sig)
+    canon = alias.get(cu, cu)
+    family = {c for c in set(alias) | set(alias.values()) if alias.get(c, c) == canon}
+    family |= {cu, canon}
     rows = []
     for c in cycle_sig:
         rr = metrics_table(c)
-        rr = rr[rr.cu == cu]
+        rr = rr[rr.cu.isin(family)]
         if not rr.empty:
             d = rr.iloc[0].to_dict()
             d["cycle"] = c
@@ -326,6 +367,8 @@ def disappeared(cycle, vs, cycle_sig):
     current = set(metrics_table(cycle).cu)
     before = metrics_table(base)
     gone = before[~before.cu.isin(current)].copy()
+    converted = set(charter_alias(cycle_sig))      # old charters that just renumbered
+    gone = gone[~gone.cu.isin(converted)]
     gone["last_cycle"] = base
     return gone[["cu", "cu_name", "state", "assets", "members", "last_cycle"]] \
         .sort_values("assets", ascending=False)
@@ -456,6 +499,14 @@ if page == "Profile":
             row = mt[mt.cu == cu].iloc[0]
             st.subheader(labels[cu])
             st.caption(f"Asset peer group: {row.band}")
+            _cv = conversions_table(sig)
+            if not _cv.empty and "new_charter" in _cv.columns:
+                _pred = _cv[_cv.new_charter == cu]
+                if not _pred.empty:
+                    _p = _pred.sort_values("cycle").iloc[-1]
+                    st.caption(f"Formerly charter #{_p.old_charter} — "
+                               f"{str(_p.conv_type).title()} conversion ({_p.cycle}). "
+                               "History below is linked across the change.")
 
             # composite rating
             rc = st.columns([1, 3])
