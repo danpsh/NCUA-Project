@@ -1,0 +1,52 @@
+name: Inspect merger report
+
+# One-off: downloads an NCUA Insurance Report of Activity ZIP and prints its
+# structure (files, Excel sheet names, first rows) to the run log, so the merger
+# columns can be mapped before building a full ingest. Reports are quarterly;
+# the month token is march / june / sept / dec.
+on:
+  workflow_dispatch:
+    inputs:
+      report:
+        description: "Report to inspect, as MONTH-YEAR (march/june/sept/dec). e.g. dec-2025"
+        required: true
+        default: "dec-2025"
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pandas openpyxl requests
+      - name: Dump report structure
+        shell: bash
+        env:
+          REPORT: ${{ inputs.report }}
+        run: |
+          python - <<'PY'
+          import io, os, zipfile, requests, pandas as pd
+          q = os.environ["REPORT"]
+          url = f"https://ncua.gov/files/publications/analysis/insurance-report-activity-{q}.zip"
+          print("URL:", url)
+          content = requests.get(url, timeout=180).content
+          print("downloaded", len(content), "bytes")
+          z = zipfile.ZipFile(io.BytesIO(content))
+          print("FILES IN ZIP:", z.namelist())
+          for n in z.namelist():
+              low = n.lower(); data = z.read(n)
+              if low.endswith((".xlsx", ".xls")):
+                  try:
+                      xls = pd.ExcelFile(io.BytesIO(data))
+                  except Exception as e:
+                      print("  (could not open", n, "-", e, ")"); continue
+                  for sh in xls.sheet_names:
+                      df = pd.read_excel(xls, sheet_name=sh, header=None, nrows=10)
+                      print(f"\n===== {n} :: sheet '{sh}' — first 10 rows (no header) =====")
+                      print(df.to_string(max_cols=14))
+              elif low.endswith((".csv", ".txt")):
+                  df = pd.read_csv(io.BytesIO(data), header=None, nrows=10, sep=None, engine="python")
+                  print(f"\n===== {n} (delimited) — first 10 rows =====")
+                  print(df.to_string(max_cols=14))
+          PY
