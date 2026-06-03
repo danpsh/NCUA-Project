@@ -330,6 +330,22 @@ def disappeared(cycle, vs, cycle_sig):
         .sort_values("assets", ascending=False)
 
 
+@st.cache_data(show_spinner="Loading mergers…")
+def merger_table(cycle_sig):
+    """Authoritative mergers from the NCUA Insurance Report of Activity."""
+    if not (DATA_DIR / "MERGERS").exists():
+        return pd.DataFrame()
+    df = con.execute(
+        f"SELECT * FROM read_parquet('{glob_for('MERGERS')}', union_by_name=true)").df()
+    df = df[df.merging_charter != df.continuing_charter]            # drop self-merge noise
+    for c in ("continuing_assets", "merging_assets"):
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+    if "merging_reason" in df.columns:
+        df["reason"] = df.merging_reason.fillna("(unstated)").astype(str).str.title()
+    return df
+
+
 def compute_flags(row, mt):
     flags = []
     if pd.notna(row.nw_ratio):
@@ -393,7 +409,7 @@ if "FOICU" not in tables:
 
 all_cycles = cycles()
 sig = tuple(sorted(all_cycles))
-page = st.sidebar.radio("View", ["Profile", "Compare", "Rankings", "Movers", "Industry"])
+page = st.sidebar.radio("View", ["Profile", "Compare", "Rankings", "Movers", "Mergers", "Industry"])
 st.sidebar.divider()
 cycle = st.sidebar.selectbox("Quarter", all_cycles)
 growth_label = st.sidebar.selectbox(
@@ -543,6 +559,21 @@ if page == "Profile":
                     "WHERE cycle = ? AND CU_NUMBER = ?", [cycle, cu]).df()
                 st.dataframe(foicu.T, use_container_width=True)
 
+            mg = merger_table(sig)
+            if not mg.empty:
+                mine = mg[mg.continuing_charter == cu].sort_values("cycle", ascending=False)
+                if not mine.empty:
+                    st.subheader("Mergers absorbed")
+                    st.caption(f"This credit union has absorbed {len(mine)} other "
+                               f"{'institution' if len(mine) == 1 else 'institutions'} since 2018, "
+                               "per the NCUA Insurance Report of Activity.")
+                    st.dataframe(pd.DataFrame({
+                        "Quarter": mine.cycle.values,
+                        "Absorbed": mine.merging_name.values,
+                        "Assets at merger": [money(x) for x in mine.merging_assets.values],
+                        "Reason": mine.reason.values}),
+                        use_container_width=True, hide_index=True)
+
             with st.expander("Raw call report tables (advanced)"):
                 table = st.selectbox("Table", [t for t in tables if t not in BROWSE_SKIP])
                 try:
@@ -661,16 +692,74 @@ elif page == "Movers":
     if gone.empty:
         st.info("No comparison quarter available, or no exits detected.")
     else:
-        st.caption(f"{len(gone):,} credit unions were in the {gone.last_cycle.iloc[0]} data "
-                   f"but gone by {cycle} — i.e. they merged or were liquidated in between. "
-                   "Charter disappearance can't distinguish a merger from a liquidation, or name "
-                   "the acquirer — the NCUA Insurance Report of Activity adds that.")
+        mg = merger_table(sig)
+        cap = (f"{len(gone):,} credit unions were in the {gone.last_cycle.iloc[0]} data "
+               f"but gone by {cycle} — i.e. they merged or were liquidated in between.")
         ex = pd.DataFrame({
             "Credit Union": gone.cu_name.values, "State": gone.state.values,
             "Last assets": [money(x) for x in gone.assets.values],
-            "Last members": [intfmt(x) for x in gone.members.values],
             "Last seen": gone.last_cycle.values})
+        if not mg.empty:
+            info = (mg[["merging_charter", "continuing_name", "reason"]]
+                    .drop_duplicates("merging_charter"))
+            j = gone.merge(info, left_on="cu", right_on="merging_charter", how="left")
+            ex["Absorbed by"] = j.continuing_name.fillna("— (liquidated or not yet reported)").values
+            ex["Reason"] = j.reason.fillna("—").values
+            cap += " Acquirer and reason come from the NCUA Insurance Report of Activity."
+        else:
+            cap += (" Charter disappearance alone can't name the acquirer — ingest the merger "
+                    "report to add that.")
+        st.caption(cap)
         st.dataframe(ex, use_container_width=True, hide_index=True, height=460)
+
+# ============================================================ INDUSTRY
+elif page == "Mergers":
+    st.subheader("Mergers")
+    mg = merger_table(sig)
+    if mg.empty:
+        st.info("No merger data yet. Run the **Ingest mergers** workflow, then reboot the app "
+                "(⋮ → Reboot) to pick it up.")
+    else:
+        st.caption(f"Authoritative NCUA Insurance Report of Activity — {mg.cycle.min()} to "
+                   f"{mg.cycle.max()}, {len(mg):,} mergers. The *merging* credit union is the one "
+                   "that disappeared; the *continuing* credit union absorbed it.")
+        cs = sorted(sig)
+        period = st.selectbox("Period", ["Selected quarter", "Trailing 4 quarters", "All time"],
+                              index=2)
+        if period == "Selected quarter":
+            sel = mg[mg.cycle == cycle]
+        elif period == "Trailing 4 quarters":
+            i = cs.index(cycle) if cycle in cs else len(cs) - 1
+            sel = mg[mg.cycle.isin(set(cs[max(0, i - 3):i + 1]))]
+        else:
+            sel = mg
+
+        st.markdown(f"**{len(sel):,} mergers — {period.lower()}**")
+        tbl = pd.DataFrame({
+            "Quarter": sel.cycle.values,
+            "Merged (disappeared)": sel.merging_name.values,
+            "Assets": [money(x) for x in sel.merging_assets.values],
+            "Absorbed by": sel.continuing_name.values,
+            "Reason": sel.reason.values,
+        }).sort_values(["Quarter", "Merged (disappeared)"], ascending=[False, True])
+        st.dataframe(tbl, use_container_width=True, hide_index=True, height=460)
+
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("**Most active acquirers**")
+            agg = sel.groupby("continuing_name").agg(
+                absorbed=("merging_charter", "count"),
+                assets=("merging_assets", "sum")).sort_values("absorbed", ascending=False).head(15)
+            st.dataframe(pd.DataFrame({
+                "Acquirer": agg.index,
+                "CUs absorbed": agg.absorbed.values,
+                "Assets absorbed": [money(x) for x in agg.assets.values]}),
+                use_container_width=True, hide_index=True)
+        with c2:
+            st.markdown("**Why they merged**")
+            rc = sel.reason.value_counts()
+            st.dataframe(pd.DataFrame({"Reason": rc.index, "Count": rc.values}),
+                         use_container_width=True, hide_index=True)
 
 # ============================================================ INDUSTRY
 elif page == "Industry":
