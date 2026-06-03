@@ -18,6 +18,7 @@ Notes:
 """
 
 import io
+import numbers
 from pathlib import Path
 
 import duckdb
@@ -164,15 +165,15 @@ def qidx(c):
 
 
 def money(x):
-    return f"${x:,.0f}" if isinstance(x, (int, float)) and not pd.isna(x) else "—"
+    return f"${x:,.0f}" if isinstance(x, numbers.Real) and not pd.isna(x) else "—"
 
 
 def intfmt(x):
-    return f"{x:,.0f}" if isinstance(x, (int, float)) and not pd.isna(x) else "—"
+    return f"{x:,.0f}" if isinstance(x, numbers.Real) and not pd.isna(x) else "—"
 
 
 def pct(x):
-    return f"{x:.2f}%" if isinstance(x, (int, float)) and not pd.isna(x) else "—"
+    return f"{x:.2f}%" if isinstance(x, numbers.Real) and not pd.isna(x) else "—"
 
 
 def stars_str(n):
@@ -397,7 +398,27 @@ def merger_table(cycle_sig):
             df[c] = pd.to_numeric(df[c], errors="coerce")
     if "merging_reason" in df.columns:
         df["reason"] = df.merging_reason.fillna("(unstated)").astype(str).str.title()
+
+    def _state(loc):
+        s = str(loc)
+        return s.rsplit(",", 1)[1].strip().upper()[:2] if "," in s else ""
+    df["merging_state"] = df.merging_location.map(_state) if "merging_location" in df.columns else ""
+    df["continuing_state"] = (df.continuing_location.map(_state)
+                              if "continuing_location" in df.columns else "")
     return df
+
+
+@st.cache_data(show_spinner=False)
+def acquirers_in_window(cycle, basis, cycle_sig):
+    """Charters that absorbed a CU during the growth window -> count absorbed.
+    YoY -> the trailing four report quarters; QoQ -> the selected quarter."""
+    mg = merger_table(cycle_sig)
+    if mg.empty:
+        return {}
+    base = yoy_cycle(cycle) if basis == "YoY" else prior_cycle(cycle)
+    rep = sorted(mg.cycle.unique())
+    win = [c for c in rep if c <= cycle and (base is None or c > base)]
+    return mg[mg.cycle.isin(win)].continuing_charter.value_counts().to_dict()
 
 
 def compute_flags(row, mt):
@@ -715,27 +736,38 @@ elif page == "Rankings":
 # ============================================================ MOVERS
 elif page == "Movers":
     st.subheader("Biggest movers")
-    st.caption(f"Growth basis: {growth_label.lower()}. "
-               "Very large jumps often signal a merger/acquisition rather than organic growth.")
+    st.caption(f"Growth basis: {growth_label.lower()}. A ✓ in the Merger column marks growth "
+               "driven by absorbing another credit union — toggle the box to exclude them.")
     m1, m2 = st.columns([2, 1])
     gkey = m1.selectbox("Growth metric", GROWTH_KEYS, format_func=lambda k: META[k][0])
     min_assets = m2.selectbox("Minimum asset size",
                               ["$10M", "$50M", "$100M", "$500M", "$1B"], index=1)
     floor = {"$10M": 10e6, "$50M": 50e6, "$100M": 100e6, "$500M": 500e6, "$1B": 1e9}[min_assets]
-    pool = mt[(mt.assets >= floor)].dropna(subset=[gkey])
+    acq = acquirers_in_window(cycle, basis, sig)
+    hide = False
+    if acq:
+        hide = st.checkbox("Exclude merger-driven growth (credit unions that absorbed "
+                           "another this period)", value=False)
+    pool = mt[(mt.assets >= floor)].dropna(subset=[gkey]).copy()
+    pool["_merger"] = pool.cu.map(lambda c: acq.get(c, 0))
+    if hide:
+        pool = pool[pool._merger == 0]
     if pool.empty:
         st.info("No credit unions with growth data for this basis yet "
                 "(needs a prior-period quarter ingested).")
     else:
-        cols = ["cu_name", "state", "assets", gkey]
+        cols = ["cu_name", "state", "assets", gkey, "_merger"]
         gain = pool.nlargest(15, gkey)[cols]
         lose = pool.nsmallest(15, gkey)[cols]
 
         def fmt_movers(df):
-            return pd.DataFrame({
+            d = pd.DataFrame({
                 "Credit Union": df.cu_name.values, "State": df.state.values,
                 "Assets": [money(x) for x in df.assets.values],
                 META[gkey][0]: [pct(x) for x in df[gkey].values]})
+            if acq and not hide:
+                d["Merger"] = [f"\u2713 \u00d7{n}" if n else "" for n in df._merger.values]
+            return d
 
         a, b = st.columns(2)
         with a:
@@ -784,8 +816,12 @@ elif page == "Mergers":
                    f"{mg.cycle.max()}, {len(mg):,} mergers. The *merging* credit union is the one "
                    "that disappeared; the *continuing* credit union absorbed it.")
         cs = sorted(sig)
-        period = st.selectbox("Period", ["Selected quarter", "Trailing 4 quarters", "All time"],
+        f1, f2 = st.columns([1, 1])
+        period = f1.selectbox("Period", ["Selected quarter", "Trailing 4 quarters", "All time"],
                               index=2)
+        states = sorted(s for s in set(mg.merging_state) | set(mg.continuing_state)
+                        if s and len(s) == 2)
+        state = f2.selectbox("State", ["All states"] + states)
         if period == "Selected quarter":
             sel = mg[mg.cycle == cycle]
         elif period == "Trailing 4 quarters":
@@ -793,8 +829,11 @@ elif page == "Mergers":
             sel = mg[mg.cycle.isin(set(cs[max(0, i - 3):i + 1]))]
         else:
             sel = mg
+        if state != "All states":
+            sel = sel[(sel.merging_state == state) | (sel.continuing_state == state)]
 
-        st.markdown(f"**{len(sel):,} mergers — {period.lower()}**")
+        scope = f"{period.lower()}" + ("" if state == "All states" else f", {state}")
+        st.markdown(f"**{len(sel):,} mergers — {scope}**")
         tbl = pd.DataFrame({
             "Quarter": sel.cycle.values,
             "Merged (disappeared)": sel.merging_name.values,
