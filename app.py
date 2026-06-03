@@ -1127,17 +1127,32 @@ elif page == "Rankings":
         if rank_key not in show_keys:
             show_keys.insert(2, rank_key)
     disp = pd.DataFrame({"Credit Union": view.cu_name.values, "State": view.state.values})
+    colcfg = {}
     for k in show_keys:
-        if k == "score":
-            disp[META[k][0]] = view[k].round(0).values            # numeric → progress bar
-        else:
-            disp[META[k][0]] = [fmt(k, x) for x in view[k].values]
+        lbl, f = META[k][0], META[k][1]
+        if f == "stars":
+            disp[lbl] = [stars_str(x) for x in view[k].values]            # keep ★ string
+        elif f == "money":
+            col = f"{lbl} ($M)"
+            disp[col] = (view[k] / 1e6).values                            # numeric, in $M
+            colcfg[col] = st.column_config.NumberColumn(col, format="$%.1f")
+        elif f == "score":
+            disp[lbl] = view[k].round(0).values                           # numeric 0–100
+            colcfg[lbl] = st.column_config.ProgressColumn(
+                lbl, min_value=0, max_value=100, format="%d")
+        elif f == "int":
+            disp[lbl] = view[k].values
+            colcfg[lbl] = st.column_config.NumberColumn(lbl, format="%d")
+        else:                                                             # pct
+            disp[lbl] = view[k].values
+            colcfg[lbl] = st.column_config.NumberColumn(lbl, format="%.2f%%")
     if tagged and not excl:
         disp["Merger"] = [merger_tag(c, acq, inf) for c in view.cu.values]
     disp.insert(0, "Rank", range(1, len(disp) + 1))
-    st.caption(f"{len(view):,} credit unions shown (of {len(mt):,} total)")
-    colcfg = {"Composite Score": st.column_config.ProgressColumn(
-        "Composite Score", min_value=0, max_value=100, format="%d")}
+    colcfg["Rank"] = st.column_config.NumberColumn("Rank", format="%d", width="small")
+    st.caption(f"{len(view):,} credit unions shown (of {len(mt):,} total). "
+               f"Rank is by **{META[rank_key][0]}** — change “Rank by” above to re-rank. "
+               "Click any column header to re-sort the grid.")
     st.dataframe(disp, use_container_width=True, hide_index=True, height=560,
                  column_config=colcfg)
 
@@ -1172,16 +1187,13 @@ elif page == "Movers":
         lose = pool.nsmallest(15, gkey)[cols]
 
         def fmt_movers(df):
-            gcol = META[gkey][0]
             d = pd.DataFrame({
                 "Credit Union": df.cu_name.values, "State": df.state.values,
                 "Assets": [money(x) for x in df.assets.values],
-                gcol: df[gkey].values})                     # numeric → colored + formatted
+                META[gkey][0]: [pct(x) for x in df[gkey].values]})
             if tagged and not hide:
                 d["Merger"] = df._tag.values
-            return (d.style
-                    .format({gcol: pct})
-                    .apply(lambda c: color_scale(c, "high"), subset=[gcol]))
+            return d
 
         a, b = st.columns(2)
         with a:
