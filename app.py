@@ -881,13 +881,21 @@ elif page == "Rankings":
     default_desc = META[rank_key][2] != "low"
     order = g2.radio("Order", ["Top (high→low)", "Bottom (low→high)"],
                      index=0 if default_desc else 1, horizontal=True)
-    if rank_key in GROWTH_KEYS:
-        st.caption("Heads-up: extreme growth usually reflects a merger/acquisition.")
+    acq = acquirers_in_window(cycle, basis, sig)
+    excl = False
+    if acq:
+        excl = st.checkbox("Exclude credit unions that absorbed another this period "
+                           "(merger-driven results)", value=False)
+    if rank_key in GROWTH_KEYS and not excl:
+        st.caption("Heads-up: extreme growth usually reflects a merger/acquisition — "
+                   "tick the box above to exclude those.")
     view = mt.copy()
     if sel_states:
         view = view[view.state.isin(sel_states)]
     if sel_bands:
         view = view[view.band.isin(sel_bands)]
+    if excl:
+        view = view[~view.cu.isin(acq)]
     view = view.dropna(subset=[rank_key]).sort_values(
         rank_key, ascending=order.startswith("Bottom")).head(int(top_n))
     if rank_key in ("score", "stars"):
@@ -900,6 +908,8 @@ elif page == "Rankings":
     disp = pd.DataFrame({"Credit Union": view.cu_name.values, "State": view.state.values})
     for k in show_keys:
         disp[META[k][0]] = [fmt(k, x) for x in view[k].values]
+    if acq and not excl:
+        disp["Merger"] = [f"\u2713 \u00d7{acq[c]}" if c in acq else "" for c in view.cu.values]
     disp.insert(0, "Rank", range(1, len(disp) + 1))
     st.caption(f"{len(view):,} credit unions shown (of {len(mt):,} total)")
     st.dataframe(disp, use_container_width=True, hide_index=True, height=560)
