@@ -19,6 +19,7 @@ Notes:
 
 import io
 import numbers
+import re
 from pathlib import Path
 
 import duckdb
@@ -127,6 +128,28 @@ def stars_str(n):
         return "—"
     n = int(n)
     return "★" * n + "☆" * (5 - n)
+
+
+SEARCH_STOP = {"federal", "credit", "union", "fcu", "cu", "the", "of", "and", "a"}
+
+
+def name_matches(names, query):
+    """Tolerant name search: matches the literal substring, OR all 'distinctive'
+    query words (ignoring suffix words like Federal/Credit/Union). So 'ozark
+    federal' matches the CU stored simply as 'OZARK'."""
+    q = (query or "").strip().lower()
+    if not q:
+        return pd.Series(False, index=names.index)
+    low = names.str.lower()
+    matched = low.str.contains(re.escape(q), na=False)
+    toks = [t for t in re.split(r"[^a-z0-9]+", q) if t and t not in SEARCH_STOP]
+    if toks:
+        allt = None
+        for t in toks:
+            m = low.str.contains(re.escape(t), na=False)
+            allt = m if allt is None else (allt & m)
+        matched = matched | allt
+    return matched
 
 
 def stars_from_z(z):
@@ -658,7 +681,7 @@ if page == "Profile":
     if not query:
         st.info("Type part of a credit union name to begin.")
     else:
-        hits = mt[mt.cu_name.str.contains(query, case=False, na=False)].head(300)
+        hits = mt[name_matches(mt.cu_name, query)].head(300)
         st.caption(f"{len(hits)} match(es) in {cycle}")
         if not hits.empty:
             labels = {r.cu: ALL_LABELS[r.cu] for r in hits.itertuples()}
@@ -927,18 +950,18 @@ elif page == "Rankings":
 # ============================================================ MOVERS
 elif page == "Movers":
     st.subheader("Biggest movers")
-    st.caption(f"Growth basis: {growth_label.lower()}. A ✓ in the Merger column marks growth "
-               "driven by absorbing another credit union — toggle the box to exclude them.")
+    st.caption(f"Growth basis: {growth_label.lower()}. A ✓ in the Merger column marks a credit "
+               "union that absorbed another in the last 4 quarters — toggle the box to exclude them.")
     m1, m2 = st.columns([2, 1])
     gkey = m1.selectbox("Growth metric", GROWTH_KEYS, format_func=lambda k: META[k][0])
     min_assets = m2.selectbox("Minimum asset size",
                               ["$10M", "$50M", "$100M", "$500M", "$1B"], index=1)
     floor = {"$10M": 10e6, "$50M": 50e6, "$100M": 100e6, "$500M": 500e6, "$1B": 1e9}[min_assets]
-    acq = acquirers_in_window(cycle, basis, sig)
+    acq = acquirers_trailing(cycle, 4, sig)
     hide = False
     if acq:
         hide = st.checkbox("Exclude merger-driven growth (credit unions that absorbed "
-                           "another this period)", value=False)
+                           "another in the last 4 quarters)", value=False)
     pool = mt[(mt.assets >= floor)].dropna(subset=[gkey]).copy()
     pool["_merger"] = pool.cu.map(lambda c: acq.get(c, 0))
     if hide:
