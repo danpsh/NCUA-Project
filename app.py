@@ -26,61 +26,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="NCUA Call Report Explorer", layout="wide",
-                   initial_sidebar_state="expanded")
-
-# ---- Institutional financial-dashboard theme (restrained, data-first) ----
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap');
-
-:root{
-  --ink:#16202c; --muted:#64748b; --line:#e3e8ee;
-  --accent:#0e7c66; --accent-soft:#0e7c661a; --panel:#f5f7f9;
-}
-html, body, .stApp, [class*="css"]{
-  font-family:'IBM Plex Sans', system-ui, -apple-system, sans-serif;
-  color:var(--ink);
-}
-/* Headings */
-.stApp h1{ font-weight:700; letter-spacing:-.02em; }
-.stApp h2, .stApp h3{ font-weight:600; letter-spacing:-.01em; }
-
-/* Metric cards: tabular figures, tighter, quiet labels */
-[data-testid="stMetric"]{ padding:.1rem 0; }
-[data-testid="stMetricValue"]{
-  font-family:'IBM Plex Mono','IBM Plex Sans',monospace;
-  font-variant-numeric:tabular-nums; font-weight:600;
-  letter-spacing:-.02em; color:var(--ink);
-}
-[data-testid="stMetricLabel"] p{
-  text-transform:uppercase; letter-spacing:.05em;
-  font-size:.68rem; font-weight:600; color:var(--muted);
-}
-
-/* Scorecard section label = small accent header with a divider line */
-.section-label{
-  text-transform:uppercase; letter-spacing:.08em; font-size:.72rem;
-  font-weight:600; color:var(--accent);
-  border-bottom:1px solid var(--line); padding-bottom:.35rem;
-  margin:1.5rem 0 .85rem 0;
-}
-.section-label:first-of-type{ margin-top:.25rem; }
-
-/* Sidebar */
-section[data-testid="stSidebar"]{ background:var(--panel); border-right:1px solid var(--line); }
-.brand{ display:flex; align-items:center; gap:.6rem; padding:.35rem 0 1.1rem 0;
-        border-bottom:1px solid var(--line); margin-bottom:1rem; }
-.brand .mark{ background:var(--accent); color:#fff; font-weight:700; font-size:.78rem;
-        letter-spacing:.04em; padding:.42rem .5rem; border-radius:7px; line-height:1; }
-.brand .txt{ display:flex; flex-direction:column; line-height:1.15; }
-.brand .txt b{ font-size:.95rem; font-weight:600; color:var(--ink); }
-.brand .txt span{ font-size:.72rem; color:var(--muted); }
-section[data-testid="stSidebar"] .stRadio label{ font-size:.92rem; padding:.12rem 0; }
-.side-cap{ text-transform:uppercase; letter-spacing:.07em; font-size:.66rem;
-        font-weight:600; color:var(--muted); margin:.2rem 0 .3rem 0; }
-</style>
-""", unsafe_allow_html=True)
+st.set_page_config(page_title="NCUA Call Report Explorer", layout="wide")
 
 DATA_DIR = Path("data")
 SKIP_TABLES = {"Readme", "Report1"}
@@ -484,14 +430,8 @@ if "FOICU" not in tables:
 
 all_cycles = cycles()
 sig = tuple(sorted(all_cycles))
-st.sidebar.markdown(
-    "<div class='brand'><div class='mark'>NCUA</div>"
-    "<div class='txt'><b>Call Report Explorer</b><span>Credit union analytics</span></div></div>",
-    unsafe_allow_html=True)
-st.sidebar.markdown("<div class='side-cap'>View</div>", unsafe_allow_html=True)
-page = st.sidebar.radio("View", ["Profile", "Compare", "Rankings", "Movers", "Mergers", "Industry"],
-                        label_visibility="collapsed")
-st.sidebar.markdown("<div class='side-cap'>Filters</div>", unsafe_allow_html=True)
+page = st.sidebar.radio("View", ["Profile", "Compare", "Rankings", "Movers", "Mergers", "Industry"])
+st.sidebar.divider()
 cycle = st.sidebar.selectbox("Quarter", all_cycles)
 growth_label = st.sidebar.selectbox(
     "Growth basis", ["Year-over-year", "Quarter-over-quarter (annualized)"])
@@ -545,7 +485,7 @@ if page == "Profile":
                 (f"Growth ({growth_label.lower()})", GROWTH_KEYS),
             ]
             for title, keys in scorecard_groups:
-                st.markdown(f"<div class='section-label'>{title}</div>", unsafe_allow_html=True)
+                st.markdown(f"**{title}**")
                 cols = st.columns(len(keys))
                 for col, key in zip(cols, keys):
                     col.metric(META[key][0], fmt(key, row[key]))
