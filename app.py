@@ -2,18 +2,19 @@
 NCUA Call Report Explorer  (Streamlit + DuckDB over Parquet)
 ============================================================
 
-Two tabs:
-  Profile  -- search a credit union, see a full FPR-style scorecard, and
-              benchmark it against a peer group (percentile ranks).
-  Rankings -- screen/sort all credit unions by any metric, filtered by state
-              and asset size.
+Tabs:
+  Profile  -- scorecard (incl. growth), trend charts across quarters, peer
+              benchmarking, and raw-table browse for one credit union.
+  Rankings -- screen/sort all credit unions by any metric (incl. growth),
+              filtered by state and asset size.
 
-All metrics are computed across every CU at once in metrics_table() and cached.
-NCUA mixes column casing (ACCT_115 vs Acct_661A); DuckDB matches identifiers
-case-insensitively, so the SQL just uses one consistent ACCT_ form.
-
-YTD income items are annualized by 12/quarter-month so ROA/ROE/NIM/NCO are
-comparable across quarters. Ratios use period-end balances (labeled as such).
+Notes:
+- NCUA mixes column casing (ACCT_115 vs Acct_661A); DuckDB matches identifiers
+  case-insensitively, so the SQL uses one consistent ACCT_ form.
+- YTD income items are annualized by 12/quarter-month so ROA/ROE/NIM compare
+  across quarters. Balance-sheet ratios use period-end balances.
+- Growth = vs the prior available quarter, annualized. Extreme values usually
+  indicate a merger/acquisition rather than organic growth.
 """
 
 from pathlib import Path
@@ -29,7 +30,7 @@ DATA_DIR = Path("data")
 SKIP_TABLES = {"Readme", "Report1"}
 BROWSE_SKIP = SKIP_TABLES | {"AcctDesc", "FOICUDES", "Acct_DescTradeNames"}
 
-# Metric registry: key, label, format, direction ("high"/"low" = better, None = level)
+# key, label, format, direction ("high"/"low" = better, None = level)
 METRICS = [
     ("assets", "Total Assets", "money", None),
     ("loans", "Loans & Leases", "money", None),
@@ -45,8 +46,13 @@ METRICS = [
     ("lts", "Loan-to-Share", "pct", None),
     ("delinquency", "Delinquency Ratio", "pct", "low"),
     ("nco", "Net Charge-Off Ratio", "pct", "low"),
+    ("assets_growth", "Asset Growth (ann.)", "pct", "high"),
+    ("members_growth", "Member Growth (ann.)", "pct", "high"),
+    ("loans_growth", "Loan Growth (ann.)", "pct", "high"),
+    ("shares_growth", "Share Growth (ann.)", "pct", "high"),
 ]
 META = {k: (lbl, fmt, dirn) for k, lbl, fmt, dirn in METRICS}
+GROWTH_KEYS = ["assets_growth", "members_growth", "loans_growth", "shares_growth"]
 
 BANDS = [
     (0, 10e6, "< $10M"), (10e6, 50e6, "$10M–50M"), (50e6, 100e6, "$50M–100M"),
@@ -83,6 +89,11 @@ def band_of(assets):
     return "Unknown"
 
 
+def qidx(c):
+    y, m = c.split("-")
+    return int(y) * 4 + int(m) // 3
+
+
 def money(x):
     return f"${x:,.0f}" if isinstance(x, (int, float)) and not pd.isna(x) else "—"
 
@@ -107,6 +118,14 @@ def cycles():
         "hive_partitioning=true) ORDER BY cycle DESC"
     ).fetchall()
     return [r[0] for r in rows]
+
+
+def prior_cycle(cycle):
+    cs = sorted(cycles())
+    if cycle in cs:
+        i = cs.index(cycle)
+        return cs[i - 1] if i > 0 else None
+    return None
 
 
 @st.cache_data(show_spinner=False)
@@ -146,7 +165,6 @@ def metrics_table(cycle):
         ON o.CU_NUMBER=a.CU_NUMBER AND o.cycle=a.cycle
       WHERE o.cycle = ?
     """, [cycle]).df()
-
     nii = d.int_income - d.int_expense
 
     def ratio(num, den):
@@ -164,6 +182,43 @@ def metrics_table(cycle):
     return d
 
 
+@st.cache_data(show_spinner=False)
+def growth_for(cycle):
+    cols = ["assets", "members", "loans", "shares"]
+    cur = metrics_table(cycle)[["cu"] + cols].copy()
+    prior = prior_cycle(cycle)
+    if prior is None:
+        for c in cols:
+            cur[f"{c}_growth"] = np.nan
+        return cur[["cu"] + [f"{c}_growth" for c in cols]]
+    qd = qidx(cycle) - qidx(prior)
+    p = (metrics_table(prior)[["cu"] + cols]
+         .rename(columns={c: f"{c}_p" for c in cols}))
+    m = cur.merge(p, on="cu", how="left")
+    for c in cols:
+        base = m[f"{c}_p"]
+        m[f"{c}_growth"] = np.where(base > 0, (m[c] / base - 1) * (4 / qd) * 100, np.nan)
+    return m[["cu"] + [f"{c}_growth" for c in cols]]
+
+
+@st.cache_data(show_spinner=False)
+def enriched_table(cycle):
+    return metrics_table(cycle).merge(growth_for(cycle), on="cu", how="left")
+
+
+@st.cache_data(show_spinner=False)
+def cu_timeseries(cu):
+    rows = []
+    for c in sorted(cycles()):
+        r = metrics_table(c)
+        rr = r[r.cu == cu]
+        if not rr.empty:
+            d = rr.iloc[0].to_dict()
+            d["cycle"] = c
+            rows.append(d)
+    return pd.DataFrame(rows).set_index("cycle") if rows else pd.DataFrame()
+
+
 # ---------------------------------------------------------------------------- UI
 
 st.title("NCUA Call Report Explorer")
@@ -173,8 +228,9 @@ if "FOICU" not in tables:
     st.error("No data under ./data. Run the ingest (or GitHub Action) and commit data/.")
     st.stop()
 
-cycle = st.sidebar.selectbox("Quarter", cycles())
-mt = metrics_table(cycle)
+all_cycles = cycles()
+cycle = st.sidebar.selectbox("Quarter", all_cycles)
+mt = enriched_table(cycle)
 
 profile_tab, rankings_tab = st.tabs(["Profile", "Rankings"])
 
@@ -194,7 +250,6 @@ with profile_tab:
             st.subheader(labels[cu])
             st.caption(f"Asset peer group: {row.band}")
 
-            # --- scorecard ---
             c1 = st.columns(5)
             for col, key in zip(c1, ["assets", "loans", "shares", "net_worth", "net_income"]):
                 col.metric(META[key][0], fmt(key, row[key]))
@@ -203,6 +258,9 @@ with profile_tab:
                 col.metric(META[key][0], fmt(key, row[key]))
             c3 = st.columns(4)
             for col, key in zip(c3, ["efficiency", "lts", "delinquency", "nco"]):
+                col.metric(META[key][0], fmt(key, row[key]))
+            c4 = st.columns(4)
+            for col, key in zip(c4, GROWTH_KEYS):
                 col.metric(META[key][0], fmt(key, row[key]))
 
             with st.expander("Efficiency Ratio breakdown"):
@@ -218,6 +276,23 @@ with profile_tab:
                     ("Efficiency Ratio", pct(row.efficiency)),
                 ], columns=["Component", "Value"])
                 st.dataframe(bd, use_container_width=True, hide_index=True)
+
+            # --- trends across quarters ---
+            if len(all_cycles) > 1:
+                st.subheader("Trends across quarters")
+                ts = cu_timeseries(cu)
+                trend_opts = [k for k, _, _, _ in METRICS if not k.endswith("_growth")]
+                chosen = st.multiselect(
+                    "Metrics to chart", trend_opts,
+                    default=["assets", "roa", "efficiency", "delinquency"],
+                    format_func=lambda k: META[k][0],
+                )
+                if not ts.empty and chosen:
+                    grid = st.columns(2)
+                    for i, key in enumerate(chosen):
+                        with grid[i % 2]:
+                            st.caption(META[key][0])
+                            st.line_chart(ts[[key]].rename(columns={key: META[key][0]}))
 
             # --- peer benchmarking ---
             st.subheader("Peer benchmarking")
@@ -237,7 +312,7 @@ with profile_tab:
             st.caption(f"Peer group: {len(peers):,} credit unions")
 
             ratio_keys = ["roa", "roe", "nim", "efficiency", "nw_ratio", "lts",
-                          "delinquency", "nco"]
+                          "delinquency", "nco"] + GROWTH_KEYS
             bench = []
             for key in ratio_keys:
                 lbl, _, dirn = META[key]
@@ -248,21 +323,17 @@ with profile_tab:
                     continue
                 med = series.median()
                 if dirn == "high":
-                    better = (series < v).mean() * 100
-                    rank = f"better than {better:.0f}% of peers"
+                    rank = f"better than {(series < v).mean() * 100:.0f}% of peers"
                 elif dirn == "low":
-                    better = (series > v).mean() * 100
-                    rank = f"better than {better:.0f}% of peers"
+                    rank = f"better than {(series > v).mean() * 100:.0f}% of peers"
                 else:
-                    p = (series < v).mean() * 100
-                    rank = f"{p:.0f}th percentile"
+                    rank = f"{(series < v).mean() * 100:.0f}th percentile"
                 bench.append((lbl, fmt(key, v), fmt(key, med), rank))
             st.dataframe(
                 pd.DataFrame(bench, columns=["Metric", "This CU", "Peer median", "Standing"]),
                 use_container_width=True, hide_index=True,
             )
 
-            # --- identity + raw browse ---
             with st.expander("Identity / FOICU fields"):
                 foicu = con.execute(
                     f"SELECT * FROM read_parquet('{glob_for('FOICU')}', hive_partitioning=true) "
@@ -301,9 +372,11 @@ with rankings_tab:
     g1, g2 = st.columns([2, 1])
     rank_key = g1.selectbox("Rank by", rankable,
                             format_func=lambda k: META[k][0], index=rankable.index("assets"))
-    default_desc = META[rank_key][2] != "low"  # low-is-better -> ascending
+    default_desc = META[rank_key][2] != "low"
     order = g2.radio("Order", ["Top (high→low)", "Bottom (low→high)"],
                      index=0 if default_desc else 1, horizontal=True)
+    if rank_key in GROWTH_KEYS:
+        st.caption("Heads-up: extreme growth usually reflects a merger/acquisition, not organic growth.")
 
     view = mt.copy()
     if sel_states:
@@ -311,10 +384,9 @@ with rankings_tab:
     if sel_bands:
         view = view[view.band.isin(sel_bands)]
     view = view.dropna(subset=[rank_key])
-    view = view.sort_values(rank_key, ascending=(order.startswith("Bottom"))).head(int(top_n))
+    view = view.sort_values(rank_key, ascending=order.startswith("Bottom")).head(int(top_n))
 
-    show_keys = ["assets", "net_worth", "roa", "efficiency", "nw_ratio",
-                 "delinquency", "lts"]
+    show_keys = ["assets", "net_worth", "roa", "efficiency", "nw_ratio", "delinquency", "lts"]
     if rank_key not in show_keys:
         show_keys.insert(0, rank_key)
     disp = pd.DataFrame({"Credit Union": view.cu_name.values, "State": view.state.values})
