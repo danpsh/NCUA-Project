@@ -205,10 +205,17 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     out_dir = Path(args.out)
+    succeeded, failed = [], []
     for q in args.quarter:
-        ingest_quarter(q, args.format, out_dir, args.keep_zip)
-    print("done.")
-    return 0
+        try:
+            ingest_quarter(q, args.format, out_dir, args.keep_zip)
+            succeeded.append(q)
+        except Exception as exc:  # noqa: BLE001 - one bad quarter shouldn't abort a batch
+            print(f"  !! skipping {q}: {exc}")
+            failed.append(q)
+    print(f"done. succeeded: {succeeded or 'none'} | failed/skipped: {failed or 'none'}")
+    # Return success if at least one quarter came through, so good data still commits.
+    return 0 if succeeded else 1
 
 
 if __name__ == "__main__":
