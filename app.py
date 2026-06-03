@@ -115,7 +115,7 @@ def fmt(key, x):
 def cycles():
     rows = con.execute(
         f"SELECT DISTINCT cycle FROM read_parquet('{glob_for('FOICU')}', "
-        "hive_partitioning=true) ORDER BY cycle DESC"
+        "hive_partitioning=true, union_by_name=true) ORDER BY cycle DESC"
     ).fetchall()
     return [r[0] for r in rows]
 
@@ -140,7 +140,7 @@ def acct_names():
     try:
         df = con.execute(
             f"SELECT Account, AcctName FROM read_parquet('{glob_for('AcctDesc')}', "
-            "hive_partitioning=true)"
+            "hive_partitioning=true, union_by_name=true)"
         ).df()
         return {str(a).upper(): str(n) for a, n in zip(df["Account"], df["AcctName"])}
     except Exception:
@@ -165,10 +165,10 @@ def metrics_table(cycle):
         TRY_CAST(a.ACCT_115  AS DOUBLE) AS int_income,
         TRY_CAST(a.ACCT_350  AS DOUBLE) AS int_expense,
         TRY_CAST(a.ACCT_117  AS DOUBLE) AS non_int_income
-      FROM read_parquet('{glob_for('FOICU')}',  hive_partitioning=true) o
-      JOIN read_parquet('{glob_for('FS220')}',  hive_partitioning=true) f
+      FROM read_parquet('{glob_for('FOICU')}',  hive_partitioning=true, union_by_name=true) o
+      JOIN read_parquet('{glob_for('FS220')}',  hive_partitioning=true, union_by_name=true) f
         ON o.CU_NUMBER=f.CU_NUMBER AND o.cycle=f.cycle
-      JOIN read_parquet('{glob_for('FS220A')}', hive_partitioning=true) a
+      JOIN read_parquet('{glob_for('FS220A')}', hive_partitioning=true, union_by_name=true) a
         ON o.CU_NUMBER=a.CU_NUMBER AND o.cycle=a.cycle
       WHERE o.cycle = ?
     """, [cycle]).df()
@@ -350,7 +350,7 @@ with profile_tab:
 
             with st.expander("Identity / FOICU fields"):
                 foicu = con.execute(
-                    f"SELECT * FROM read_parquet('{glob_for('FOICU')}', hive_partitioning=true) "
+                    f"SELECT * FROM read_parquet('{glob_for('FOICU')}', hive_partitioning=true, union_by_name=true) "
                     "WHERE cycle = ? AND CU_NUMBER = ?", [cycle, cu]).df()
                 st.dataframe(foicu.T, use_container_width=True)
 
@@ -358,7 +358,7 @@ with profile_tab:
             table = st.selectbox("Table", [t for t in tables if t not in BROWSE_SKIP])
             try:
                 raw = con.execute(
-                    f"SELECT * FROM read_parquet('{glob_for(table)}', hive_partitioning=true) "
+                    f"SELECT * FROM read_parquet('{glob_for(table)}', hive_partitioning=true, union_by_name=true) "
                     "WHERE cycle = ? AND CU_NUMBER = ?", [cycle, cu]).df()
             except Exception as e:
                 st.warning(f"Could not read {table}: {e}")
