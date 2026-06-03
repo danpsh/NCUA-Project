@@ -232,6 +232,35 @@ def color_scale(series, direction):
     return css
 
 
+def mix_frame(vals, parts, total_code, residual_label):
+    """Build a composition DataFrame (Category, Amount $M, Share %) that foots to the
+    reported total, with a residual line for anything not separately reported."""
+    total = vals.get(total_code.upper())
+    if not total or total <= 0:
+        return pd.DataFrame()
+    rows, used = [], 0.0
+    for lbl, code in parts:
+        v = vals.get(code.upper(), 0.0) or 0.0
+        if v > total * 0.0005:        # ≥0.05% of total; tiny lines fold into residual
+            rows.append((lbl, v))
+            used += v
+    resid = total - used
+    if resid > total * 0.001:
+        rows.append((residual_label, resid))
+    rows.sort(key=lambda r: -r[1])
+    return pd.DataFrame({
+        "Category": [r[0] for r in rows],
+        "Amount ($M)": [r[1] / 1e6 for r in rows],
+        "Share": [r[1] / total * 100 for r in rows]})
+
+
+def mix_dataframe(df):
+    st.dataframe(df, use_container_width=True, hide_index=True, column_config={
+        "Amount ($M)": st.column_config.NumberColumn("Amount ($M)", format="$%.1f"),
+        "Share": st.column_config.ProgressColumn(
+            "Share of total", min_value=0, max_value=100, format="%.1f%%")})
+
+
 PEER_BAR_CSS = """<style>
 .pb-wrap{font-size:0.9rem;margin-top:.25rem}
 .pb-row{display:grid;grid-template-columns:165px 90px 90px 1fr;align-items:center;
@@ -283,6 +312,115 @@ def to_excel_bytes(sheets):
     with pd.ExcelWriter(buf, engine="openpyxl") as xw:
         for name, df in sheets.items():
             df.to_excel(xw, sheet_name=name[:31])
+    return buf.getvalue()
+
+
+def _stars_pdf(n):
+    n = int(n) if pd.notna(n) else 0
+    return "\u2605" * n + "\u2606" * (5 - n)
+
+
+def tearsheet_pdf(row, cycle, lens, hist, vals):
+    """One-page PDF tearsheet for a single credit union."""
+    from reportlab.lib.pagesizes import LETTER
+    from reportlab.lib import colors
+    from reportlab.lib.units import inch
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer,
+                                     Table, TableStyle)
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf, pagesize=LETTER, topMargin=0.55 * inch, bottomMargin=0.45 * inch,
+        leftMargin=0.6 * inch, rightMargin=0.6 * inch,
+        title=f"{row.cu_name} — {cycle} tearsheet")
+    S = getSampleStyleSheet()
+    teal = colors.HexColor("#0b6b5e")
+    grey = colors.HexColor("#666666")
+    grid = colors.HexColor("#dddddd")
+    headbg = colors.HexColor("#eef2f1")
+    title = ParagraphStyle("t", parent=S["Title"], fontSize=17, alignment=0, spaceAfter=1)
+    subt = ParagraphStyle("s", parent=S["Normal"], fontSize=9, textColor=grey)
+    big = ParagraphStyle("b", parent=S["Normal"], fontSize=11, spaceBefore=4)
+    sec = ParagraphStyle("sec", parent=S["Heading4"], fontSize=10.5,
+                         textColor=teal, spaceBefore=11, spaceAfter=3)
+    foot = ParagraphStyle("f", parent=S["Normal"], fontSize=7.5, textColor=grey)
+
+    def tbl(data, widths, header=True):
+        t = Table(data, colWidths=widths)
+        sty = [("FONTSIZE", (0, 0), (-1, -1), 9),
+               ("GRID", (0, 0), (-1, -1), 0.5, grid),
+               ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+               ("LEFTPADDING", (0, 0), (-1, -1), 6),
+               ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+               ("TOPPADDING", (0, 0), (-1, -1), 3),
+               ("BOTTOMPADDING", (0, 0), (-1, -1), 3)]
+        if header:
+            sty += [("BACKGROUND", (0, 0), (-1, 0), headbg),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold")]
+        t.setStyle(TableStyle(sty))
+        return t
+
+    el = [Paragraph(row.cu_name, title),
+          Paragraph(f"Charter #{row.cu} &nbsp;·&nbsp; {row.state} &nbsp;·&nbsp; {cycle} "
+                    f"&nbsp;·&nbsp; peer group {row.band}", subt)]
+    sc = f"{row.score:.0f}/100" if pd.notna(row.score) else "\u2014"
+    el.append(Paragraph(
+        f"<b>Composite score {sc}</b> &nbsp; {_stars_pdf(row.stars)} "
+        f"&nbsp;&nbsp;<font color='#666' size=8>{lens}</font>", big))
+
+    el.append(Paragraph("Key figures", sec))
+    el.append(tbl([
+        ["Total Assets", money(row.assets), "Net Worth", money(row.net_worth)],
+        ["Members", intfmt(row.members), "Net Worth Ratio", pct(row.nw_ratio)],
+        ["ROA", pct(row.roa), "Efficiency Ratio", pct(row.efficiency)],
+    ], [1.3 * inch, 1.7 * inch, 1.6 * inch, 1.6 * inch], header=False))
+
+    def col2(left, right):
+        t = Table([[left, right]], colWidths=[3.35 * inch, 3.35 * inch])
+        t.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (0, 0), 0), ("RIGHTPADDING", (0, 0), (0, 0), 12),
+            ("LEFTPADDING", (1, 0), (1, 0), 0), ("RIGHTPADDING", (1, 0), (-1, -1), 0),
+            ("TOPPADDING", (0, 0), (-1, -1), 0), ("BOTTOMPADDING", (0, 0), (-1, -1), 0)]))
+        return t
+
+    rk = ["roa", "roe", "nim", "efficiency", "nw_ratio", "delinquency", "nco", "lts"]
+    ratio_tbl = tbl([["Metric", "Value"]] + [[META[k][0], fmt(k, row[k])] for k in rk],
+                    [2.1 * inch, 1.05 * inch])
+    growth_tbl = tbl([["Metric", "Value"]] + [[META[k][0], fmt(k, row[k])] for k in GROWTH_KEYS],
+                     [2.1 * inch, 1.05 * inch])
+    left = [Paragraph("Profitability, capital &amp; asset quality", sec), ratio_tbl]
+    right = [Paragraph("Growth", sec), growth_tbl]
+    if hist is not None and len(hist) > 1:
+        hdata = [["Yr", "Score", "%ile"]]
+        for ix, r in hist.iterrows():
+            lbl = ix[:4] if str(ix).endswith("-12") else str(ix)
+            hdata.append([lbl, f"{r.score:.0f}", f"{r.pct:.0f}%"])
+        right += [Paragraph("Composite score history", sec),
+                  tbl(hdata, [1.2 * inch, 1.0 * inch, 0.95 * inch])]
+    el.append(col2(left, right))
+
+    lm = mix_frame(vals, LOAN_MIX, "ACCT_025B", "Real estate, commercial & other")
+    dm = mix_frame(vals, DEPOSIT_MIX, "ACCT_018", "Other (incl. IRA / Keogh)")
+    cell = ParagraphStyle("cell", parent=S["Normal"], fontSize=8.5, leading=10)
+
+    def mix_tbl(mx):
+        data = [["Category", "Amt", "Share"]] + [
+            [Paragraph(r["Category"], cell), f"${r['Amount ($M)']:,.1f}M", f"{r['Share']:.1f}%"]
+            for _, r in mx.iterrows()]
+        return tbl(data, [1.9 * inch, 0.75 * inch, 0.65 * inch])
+    mleft = [Paragraph("Loan mix", sec), mix_tbl(lm)] if not lm.empty else []
+    mright = [Paragraph("Deposit mix", sec), mix_tbl(dm)] if not dm.empty else []
+    if mleft or mright:
+        el.append(col2(mleft, mright))
+
+    el.append(Spacer(1, 10))
+    el.append(Paragraph(
+        "Source: NCUA 5300 Call Report. Composite score is a peer-relative z-score blend "
+        "(50 = peer average) under the selected lens. Real estate and commercial loan "
+        "balances are not separately reported in the source files and appear in the loan-mix "
+        "residual. Generated by NCUA Call Report Explorer.", foot))
+    doc.build(el)
     return buf.getvalue()
 
 
@@ -479,6 +617,43 @@ def score_history(cu, basis, lens, cycle, cycle_sig):
         rows.append({"cycle": c, "score": s, "stars": r.iloc[0].stars,
                      "pct": float((et.score < s).mean() * 100)})
     return pd.DataFrame(rows).set_index("cycle") if rows else pd.DataFrame()
+
+
+@st.cache_data(show_spinner=False)
+def acct_values(cu, cycle, cycle_sig):
+    """All FS220 + FS220A account balances for one credit union / cycle as
+    {ACCT_CODE_UPPER: float}."""
+    vals = {}
+    for table in ("FS220", "FS220A"):
+        try:
+            df = con.execute(
+                f"SELECT * FROM read_parquet('{glob_for(table)}', "
+                "hive_partitioning=true, union_by_name=true) "
+                "WHERE cycle = ? AND CU_NUMBER = ?", [cycle, cu]).df()
+        except Exception:
+            continue
+        if df.empty:
+            continue
+        r = df.iloc[0]
+        for c in df.columns:
+            try:
+                x = float(r[c])
+                if x == x:
+                    vals.setdefault(c.upper(), x)
+            except (TypeError, ValueError):
+                pass
+    return vals
+
+
+# Loan & deposit composition (verified NCUA balance codes present in FS220/FS220A).
+# Real-estate and commercial loan balances are NOT in the ingested files, so loan mix
+# carries a residual; deposit mix carries a small residual for IRA/other.
+LOAN_MIX = [("Credit card", "ACCT_396"), ("New vehicle", "ACCT_385"),
+            ("Used vehicle", "ACCT_370"), ("Other unsecured", "ACCT_397"),
+            ("Leases", "ACCT_002")]
+DEPOSIT_MIX = [("Share drafts (checking)", "ACCT_902"), ("Regular shares", "ACCT_657"),
+               ("Money market", "ACCT_911"), ("Share certificates (CDs)", "ACCT_908C"),
+               ("Non-member deposits", "ACCT_457")]
 
 
 @st.cache_data(show_spinner=False)
@@ -874,7 +1049,8 @@ ALL_LABELS = {r.cu: f"{r.cu_name} (#{r.cu}, {r.state})" for r in mt.itertuples()
 
 # ============================================================ PROFILE
 if page == "Profile":
-    query = st.text_input("Search a credit union by name", placeholder="e.g. BluCurrent")
+    query = st.text_input("Search a credit union by name", value="BluCurrent",
+                          placeholder="e.g. BluCurrent")
     if not query:
         st.info("Type part of a credit union name to begin.")
     else:
@@ -964,12 +1140,24 @@ if page == "Profile":
                 st.divider()
                 sc = pd.DataFrame(
                     {"Value": {META[k][0]: fmt(k, row[k]) for k, _, _, _ in METRICS}})
-                st.download_button(
+                dl1, dl2 = st.columns(2)
+                dl1.download_button(
                     "Download scorecard (Excel)",
                     to_excel_bytes({"Scorecard": sc}),
                     file_name=f"{row.cu_name}_{cycle}_scorecard.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
                 )
+                try:
+                    pdf_bytes = tearsheet_pdf(row, cycle, lens, hist,
+                                              acct_values(cu, cycle, sig))
+                    dl2.download_button(
+                        "Download tearsheet (PDF)", pdf_bytes,
+                        file_name=f"{row.cu_name}_{cycle}_tearsheet.pdf",
+                        mime="application/pdf", use_container_width=True,
+                    )
+                except Exception as exc:
+                    dl2.caption(f"PDF tearsheet unavailable ({exc}).")
                 with st.expander("Efficiency Ratio breakdown"):
                     nii = row.int_income - row.int_expense
                     rev = nii + row.non_int_income
@@ -1004,6 +1192,32 @@ if page == "Profile":
                         note += (" Income figures are year-to-date in the call report; the "
                                  "Quarters view de-cumulates them into standalone quarters.")
                     st.caption(note)
+
+                st.divider()
+                vals = acct_values(cu, cycle, sig)
+                mc1, mc2 = st.columns(2)
+                with mc1:
+                    st.markdown("**Loan mix**")
+                    lm = mix_frame(vals, LOAN_MIX, "ACCT_025B",
+                                   "Real estate, commercial & other")
+                    if lm.empty:
+                        st.caption("No loan data for this credit union.")
+                    else:
+                        mix_dataframe(lm)
+                        st.caption("Real estate and commercial balances aren't separately "
+                                   "reported in the ingested call-report files, so they're "
+                                   "grouped in the residual line.")
+                with mc2:
+                    st.markdown("**Deposit mix**")
+                    dm = mix_frame(vals, DEPOSIT_MIX, "ACCT_018",
+                                   "Other (incl. IRA / Keogh)")
+                    if dm.empty:
+                        st.caption("No deposit data for this credit union.")
+                    else:
+                        mix_dataframe(dm)
+                        st.caption("Share composition from the NCUA call report; the residual "
+                                   "captures IRA/Keogh and any other shares.")
+
                 with st.expander("Raw call report tables (advanced)"):
                     table = st.selectbox("Table", [t for t in tables if t not in BROWSE_SKIP])
                     try:
@@ -1137,13 +1351,18 @@ elif page == "Compare":
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         if len(all_cycles) > 1:
             st.subheader("Trend overlays")
+            oc1, oc2 = st.columns([1, 3])
+            ov_span = oc1.radio("Period", ["Quarters", "Years"], horizontal=True,
+                                key="cmp_span")
             ov_opts = [k for k, _, _, _ in METRICS if not k.endswith("_growth")]
-            ov_keys = st.multiselect(
+            ov_keys = oc2.multiselect(
                 "Metrics to chart", ov_opts, default=ov_opts,
                 format_func=lambda k: META[k][0])
             grid = st.columns(2)
             for i, key in enumerate(ov_keys):
                 series = multi_cu_series(picks, key, ALL_LABELS, sig)
+                if ov_span == "Years" and not series.empty:
+                    series = series[[str(ix).endswith("-12") for ix in series.index]]
                 if not series.empty:
                     with grid[i % 2]:
                         st.caption(META[key][0])
