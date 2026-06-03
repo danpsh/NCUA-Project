@@ -322,9 +322,11 @@ def growth_for(cycle, basis, cycle_sig):
 @st.cache_data(show_spinner=False)
 def enriched_table(cycle, basis, cycle_sig):
     df = metrics_table(cycle).merge(growth_for(cycle, basis, cycle_sig), on="cu", how="left")
-    # Recent acquirers (a CU they absorbed left the call reports in the last 4 quarters).
+    # Recent acquirers (a CU they absorbed left the call reports in the last 4 quarters),
+    # plus likely-but-unpublished mergers inferred from the call reports themselves.
     acq = merger_acquirers(cycle, cycle_sig)
-    is_acq = df.cu.isin(acq)
+    inf = inferred_acquirers(cycle, cycle_sig)
+    is_acq = df.cu.isin(acq) | df.cu.isin(inf)
     df["is_acquirer"] = is_acq
     # Composite score: weighted blend of band-relative z-scores (SDs from the asset-band
     # peer mean). The peer mean/std EXCLUDE recent acquirers, so merger-driven growth
@@ -609,6 +611,53 @@ def merger_acquirers(cycle, cycle_sig, lookback=4):
     vanished = were - cur                      # charters that left during the window
     sub = mg[mg.merging_charter.isin(vanished)]
     return sub.groupby("continuing_charter")["merging_charter"].nunique().to_dict()
+
+
+@st.cache_data(show_spinner=False)
+def inferred_acquirers(cycle, cycle_sig, lookback=4):
+    """Likely (not-yet-published) mergers flagged by footprint, not the merger report.
+    A single-quarter jump in BOTH members and assets that's too large to be organic:
+    even a hot deposit campaign brings in dollars, not tens of thousands of members in
+    90 days, so a big member jump alongside an asset jump is a near-certain absorption.
+    Requires both within the last `lookback` quarters; excludes already-confirmed
+    acquirers. Returns {cu: 1}."""
+    confirmed = set(merger_acquirers(cycle, cycle_sig))
+    conv = set(charter_alias(cycle_sig))
+    cs = sorted(cycle_sig)
+    if cycle not in cs:
+        return {}
+    i = cs.index(cycle)
+    window = cs[max(1, i - lookback + 1): i + 1]
+    cache = {}
+
+    def met(c):
+        if c not in cache:
+            cache[c] = metrics_table(c)[["cu", "assets", "members"]]
+        return cache[c]
+
+    out = {}
+    for q in window:
+        qi = cs.index(q)
+        if qi == 0:
+            continue
+        m = met(q).merge(met(cs[qi - 1]), on="cu", suffixes=("", "_0"))
+        dm = m.members - m.members_0
+        mg = dm / m.members_0.where(m.members_0 > 0)
+        ag = (m.assets - m.assets_0) / m.assets_0.where(m.assets_0 > 0)
+        hit = m[(mg >= 0.20) & (ag >= 0.15) & (dm >= 1500) & (~m.cu.isin(conv))]
+        for cu in hit.cu:
+            if cu not in confirmed:
+                out[cu] = 1
+    return out
+
+
+def merger_tag(cu, confirmed, inferred):
+    """Display tag: confirmed mergers get '✓ ×N', inferred ones a softer '≈ likely'."""
+    if confirmed.get(cu):
+        return f"\u2713 \u00d7{confirmed[cu]}"
+    if cu in inferred:
+        return "\u2248 likely"
+    return ""
 
 
 def compute_flags(row, mt):
@@ -933,8 +982,10 @@ elif page == "Rankings":
     order = g2.radio("Order", ["Top (high→low)", "Bottom (low→high)"],
                      index=0 if default_desc else 1, horizontal=True)
     acq = merger_acquirers(cycle, sig)
+    inf = inferred_acquirers(cycle, sig)
+    tagged = set(acq) | set(inf)
     excl = False
-    if acq:
+    if tagged:
         excl = st.checkbox("Exclude credit unions that absorbed another in the last 4 quarters "
                            "(merger-driven results)", value=False)
     if rank_key in GROWTH_KEYS and not excl:
@@ -946,7 +997,7 @@ elif page == "Rankings":
     if sel_bands:
         view = view[view.band.isin(sel_bands)]
     if excl:
-        view = view[~view.cu.isin(acq)]
+        view = view[~view.cu.isin(tagged)]
     view = view.dropna(subset=[rank_key]).sort_values(
         rank_key, ascending=order.startswith("Bottom")).head(int(top_n))
     if rank_key in ("score", "stars"):
@@ -959,8 +1010,8 @@ elif page == "Rankings":
     disp = pd.DataFrame({"Credit Union": view.cu_name.values, "State": view.state.values})
     for k in show_keys:
         disp[META[k][0]] = [fmt(k, x) for x in view[k].values]
-    if acq and not excl:
-        disp["Merger"] = [f"\u2713 \u00d7{acq[c]}" if c in acq else "" for c in view.cu.values]
+    if tagged and not excl:
+        disp["Merger"] = [merger_tag(c, acq, inf) for c in view.cu.values]
     disp.insert(0, "Rank", range(1, len(disp) + 1))
     st.caption(f"{len(view):,} credit unions shown (of {len(mt):,} total)")
     st.dataframe(disp, use_container_width=True, hide_index=True, height=560)
@@ -968,27 +1019,30 @@ elif page == "Rankings":
 # ============================================================ MOVERS
 elif page == "Movers":
     st.subheader("Biggest movers")
-    st.caption(f"Growth basis: {growth_label.lower()}. A ✓ in the Merger column marks a credit "
-               "union that absorbed another in the last 4 quarters — toggle the box to exclude them.")
+    st.caption(f"Growth basis: {growth_label.lower()}. In the Merger column, ✓ marks a confirmed "
+               "acquirer (last 4 quarters) and ≈ a likely one not yet in the NCUA report — "
+               "toggle the box to exclude them.")
     m1, m2 = st.columns([2, 1])
     gkey = m1.selectbox("Growth metric", GROWTH_KEYS, format_func=lambda k: META[k][0])
     min_assets = m2.selectbox("Minimum asset size",
                               ["$10M", "$50M", "$100M", "$500M", "$1B"], index=1)
     floor = {"$10M": 10e6, "$50M": 50e6, "$100M": 100e6, "$500M": 500e6, "$1B": 1e9}[min_assets]
     acq = merger_acquirers(cycle, sig)
+    inf = inferred_acquirers(cycle, sig)
+    tagged = set(acq) | set(inf)
     hide = False
-    if acq:
+    if tagged:
         hide = st.checkbox("Exclude merger-driven growth (credit unions that absorbed "
                            "another in the last 4 quarters)", value=False)
     pool = mt[(mt.assets >= floor)].dropna(subset=[gkey]).copy()
-    pool["_merger"] = pool.cu.map(lambda c: acq.get(c, 0))
+    pool["_tag"] = [merger_tag(c, acq, inf) for c in pool.cu.values]
     if hide:
-        pool = pool[pool._merger == 0]
+        pool = pool[pool._tag == ""]
     if pool.empty:
         st.info("No credit unions with growth data for this basis yet "
                 "(needs a prior-period quarter ingested).")
     else:
-        cols = ["cu_name", "state", "assets", gkey, "_merger"]
+        cols = ["cu_name", "state", "assets", gkey, "_tag"]
         gain = pool.nlargest(15, gkey)[cols]
         lose = pool.nsmallest(15, gkey)[cols]
 
@@ -997,8 +1051,8 @@ elif page == "Movers":
                 "Credit Union": df.cu_name.values, "State": df.state.values,
                 "Assets": [money(x) for x in df.assets.values],
                 META[gkey][0]: [pct(x) for x in df[gkey].values]})
-            if acq and not hide:
-                d["Merger"] = [f"\u2713 \u00d7{n}" if n else "" for n in df._merger.values]
+            if tagged and not hide:
+                d["Merger"] = df._tag.values
             return d
 
         a, b = st.columns(2)
