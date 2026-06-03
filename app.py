@@ -190,7 +190,7 @@ def metrics_table(cycle):
 
 
 @st.cache_data(show_spinner=False)
-def growth_for(cycle, basis):
+def growth_for(cycle, basis, cycle_sig):
     cols = ["assets", "members", "loans", "shares"]
     cur = metrics_table(cycle)[["cu"] + cols].copy()
     if basis == "YoY":
@@ -212,14 +212,14 @@ def growth_for(cycle, basis):
 
 
 @st.cache_data(show_spinner=False)
-def enriched_table(cycle, basis):
-    return metrics_table(cycle).merge(growth_for(cycle, basis), on="cu", how="left")
+def enriched_table(cycle, basis, cycle_sig):
+    return metrics_table(cycle).merge(growth_for(cycle, basis, cycle_sig), on="cu", how="left")
 
 
 @st.cache_data(show_spinner=False)
-def cu_timeseries(cu):
+def cu_timeseries(cu, cycle_sig):
     rows = []
-    for c in sorted(cycles()):
+    for c in cycle_sig:
         r = metrics_table(c)
         rr = r[r.cu == cu]
         if not rr.empty:
@@ -243,7 +243,7 @@ cycle = st.sidebar.selectbox("Quarter", all_cycles)
 growth_label = st.sidebar.selectbox(
     "Growth basis", ["Year-over-year", "Quarter-over-quarter (annualized)"])
 basis = "YoY" if growth_label.startswith("Year") else "QoQ"
-mt = enriched_table(cycle, basis)
+mt = enriched_table(cycle, basis, tuple(all_cycles))
 
 profile_tab, rankings_tab = st.tabs(["Profile", "Rankings"])
 
@@ -294,7 +294,7 @@ with profile_tab:
             # --- trends across quarters ---
             if len(all_cycles) > 1:
                 st.subheader("Trends across quarters")
-                ts = cu_timeseries(cu)
+                ts = cu_timeseries(cu, tuple(sorted(all_cycles)))
                 trend_opts = [k for k, _, _, _ in METRICS if not k.endswith("_growth")]
                 chosen = st.multiselect(
                     "Metrics to chart", trend_opts,
