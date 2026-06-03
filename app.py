@@ -462,9 +462,11 @@ def acct_names():
 @st.cache_data(show_spinner="Computing metrics for all credit unions…")
 def metrics_table(cycle):
     annualize = 12 / int(cycle[-2:])
+    pye = f"{int(cycle[:4]) - 1}-12"          # prior year-end, for FPR average balances
     d = con.execute(f"""
       SELECT o.CU_NUMBER AS cu, o.CU_NAME AS cu_name, COALESCE(o.STATE, '') AS state,
         TRY_CAST(f.ACCT_010  AS DOUBLE) AS assets,
+        TRY_CAST(p.assets_pye AS DOUBLE) AS assets_pye,
         TRY_CAST(f.ACCT_025B AS DOUBLE) AS loans,
         TRY_CAST(f.ACCT_018  AS DOUBLE) AS shares,
         TRY_CAST(f.ACCT_671  AS DOUBLE) AS opex,
@@ -482,16 +484,25 @@ def metrics_table(cycle):
         ON o.CU_NUMBER=f.CU_NUMBER AND o.cycle=f.cycle
       JOIN read_parquet('{glob_for('FS220A')}', hive_partitioning=true, union_by_name=true) a
         ON o.CU_NUMBER=a.CU_NUMBER AND o.cycle=a.cycle
+      LEFT JOIN (
+        SELECT CU_NUMBER, TRY_CAST(ACCT_010 AS DOUBLE) AS assets_pye
+        FROM read_parquet('{glob_for('FS220')}', hive_partitioning=true, union_by_name=true)
+        WHERE cycle = '{pye}'
+      ) p ON o.CU_NUMBER = p.CU_NUMBER
       WHERE o.cycle = ?
     """, [cycle]).df()
     nii = d.int_income - d.int_expense
+    # FPR "Average Assets" = (current period + prior year-end) / 2; fall back to the
+    # period-end balance when no prior year-end is available (new/renumbered charters).
+    avg_assets = d.assets.where(d.assets_pye.isna() | (d.assets_pye == 0),
+                                (d.assets + d.assets_pye) / 2)
 
     def ratio(num, den):
         return np.where(den.notna() & (den != 0), num / den * 100, np.nan)
 
     d["roa"] = ratio(d.net_income * annualize, d.assets)
     d["roe"] = ratio(d.net_income * annualize, d.net_worth)
-    d["nim"] = ratio(nii * annualize, d.assets)
+    d["nim"] = ratio(nii * annualize, avg_assets)   # NCUA FPR: NII / average assets
     d["efficiency"] = ratio(d.opex, nii + d.non_int_income)
     d["nw_ratio"] = ratio(d.net_worth, d.assets)
     d["lts"] = ratio(d.loans, d.shares)
@@ -937,8 +948,8 @@ def render_yield_spread(cu, cycle, cycle_sig):
         "assets net of loans, fixed assets, the NCUSIF deposit and cash on hand. Cost of "
         "funds is total interest expense over average shares + borrowings; net interest "
         "spread is the earning-asset yield minus cost of funds. Net interest margin is "
-        "net interest income over average assets and can differ slightly from the "
-        "scorecard NIM, which uses period-end assets. Deltas are vs. one year prior.")
+        "net interest income over average assets, per the NCUA FPR method. Deltas are "
+        "vs. one year prior.")
 
 
 @st.cache_data(show_spinner="Building industry history…")
