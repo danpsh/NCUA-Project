@@ -406,19 +406,17 @@ with profile_tab:
             else:
                 st.success("No watch flags — capital, earnings, and asset quality look sound.")
 
-            c1 = st.columns(5)
-            for col, key in zip(c1, ["assets", "loans", "shares", "net_worth", "net_income"]):
-                col.metric(META[key][0], fmt(key, row[key]))
-            c2 = st.columns(5)
-            for col, key in zip(c2, ["roa", "roe", "nim", "nw_ratio", "members"]):
-                col.metric(META[key][0], fmt(key, row[key]))
-            c3 = st.columns(4)
-            for col, key in zip(c3, ["efficiency", "lts", "delinquency", "nco"]):
-                col.metric(META[key][0], fmt(key, row[key]))
-            c4 = st.columns(4)
-            for col, key in zip(c4, GROWTH_KEYS):
-                col.metric(META[key][0], fmt(key, row[key]))
-            st.caption(f"Growth basis: {growth_label.lower()}")
+            scorecard_groups = [
+                ("Size & membership", ["assets", "loans", "shares", "net_worth", "members"]),
+                ("Earnings", ["roa", "roe", "nim", "net_income", "efficiency"]),
+                ("Capital & asset quality", ["nw_ratio", "delinquency", "nco", "lts"]),
+                (f"Growth ({growth_label.lower()})", GROWTH_KEYS),
+            ]
+            for title, keys in scorecard_groups:
+                st.markdown(f"**{title}**")
+                cols = st.columns(len(keys))
+                for col, key in zip(cols, keys):
+                    col.metric(META[key][0], fmt(key, row[key]))
 
             # one-click Excel export of this CU's scorecard
             sc = pd.DataFrame(
