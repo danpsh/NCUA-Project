@@ -26,6 +26,7 @@ import duckdb
 import numpy as np
 import pandas as pd
 import streamlit as st
+import altair as alt
 
 st.set_page_config(page_title="NCUA Call Report Explorer", layout="wide")
 
@@ -259,6 +260,30 @@ def mix_dataframe(df):
         "Amount ($M)": st.column_config.NumberColumn("Amount ($M)", format="$%.1f"),
         "Share": st.column_config.ProgressColumn(
             "Share of total", min_value=0, max_value=100, format="%.1f%%")})
+
+
+MIX_PALETTE = ["#127f74", "#4cae9e", "#8ec9bf", "#c9a227", "#d97742",
+               "#3b6fb6", "#7b6fb0", "#9aa0a6"]
+
+
+def mix_pie(df):
+    order = list(df["Category"])      # keep table order (largest first) in legend
+    chart = (
+        alt.Chart(df)
+        .mark_arc(innerRadius=50, stroke="white", strokeWidth=1.5)
+        .encode(
+            theta=alt.Theta("Amount ($M):Q", stack=True),
+            color=alt.Color(
+                "Category:N", sort=order,
+                scale=alt.Scale(domain=order, range=MIX_PALETTE[:len(order)]),
+                legend=alt.Legend(title=None, orient="bottom", columns=2,
+                                  labelLimit=170, symbolType="circle")),
+            order=alt.Order("Amount ($M):Q", sort="descending"),
+            tooltip=[alt.Tooltip("Category:N"),
+                     alt.Tooltip("Amount ($M):Q", title="Amount ($M)", format=",.1f"),
+                     alt.Tooltip("Share:Q", title="Share", format=".1f")])
+        .properties(height=240))
+    st.altair_chart(chart, use_container_width=True)
 
 
 PEER_BAR_CSS = """<style>
@@ -1209,6 +1234,7 @@ if page == "Profile":
                     if lm.empty:
                         st.caption("No loan data for this credit union.")
                     else:
+                        mix_pie(lm)
                         mix_dataframe(lm)
                         st.caption("Loan composition from Section 1 of the NCUA 5300 "
                                    "(first mortgage, other RE, vehicle, commercial, and "
@@ -1220,6 +1246,7 @@ if page == "Profile":
                     if dm.empty:
                         st.caption("No deposit data for this credit union.")
                     else:
+                        mix_pie(dm)
                         mix_dataframe(dm)
                         st.caption("Share composition from the NCUA call report; the residual "
                                    "captures IRA/Keogh and any other shares.")
