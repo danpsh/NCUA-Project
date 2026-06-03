@@ -61,15 +61,24 @@ META["score"] = ("Composite Score", "score", "high")
 META["stars"] = ("Star Rating", "stars", "high")
 GROWTH_KEYS = ["assets_growth", "members_growth", "loans_growth", "shares_growth"]
 
-# Composite score — GROWTH / MOMENTUM lens: growth weighted heaviest, then
-# earnings, with a light asset-quality guardrail. Weights sum to 1.0.
-SCORE_WEIGHTS = [
-    ("assets_growth", 0.20), ("loans_growth", 0.15),
-    ("members_growth", 0.10), ("shares_growth", 0.10),   # growth = 55%
-    ("roa", 0.20), ("nim", 0.10),                          # earnings = 30%
-    ("efficiency", 0.10),                                  # operating leverage = 10%
-    ("delinquency", 0.05),                                 # asset-quality guardrail = 5%
-]
+# Composite score — two selectable "lenses" (weight sets), each summing to 1.0.
+# Momentum = growth-led (who's expanding fastest); Performance = earnings, capital,
+# and asset-quality led (who's financially strongest), with growth a light factor.
+SCORE_LENSES = {
+    "Momentum (growth-led)": [
+        ("assets_growth", 0.20), ("loans_growth", 0.15),
+        ("members_growth", 0.10), ("shares_growth", 0.10),    # growth = 55%
+        ("roa", 0.20), ("nim", 0.10),                          # earnings = 30%
+        ("efficiency", 0.10),                                  # operating leverage = 10%
+        ("delinquency", 0.05),                                 # asset-quality guardrail = 5%
+    ],
+    "Performance (earnings & health)": [
+        ("roa", 0.25), ("nim", 0.10), ("efficiency", 0.15),    # profitability/ops = 50%
+        ("nw_ratio", 0.15),                                    # capital = 15%
+        ("delinquency", 0.10), ("nco", 0.10),                  # asset quality = 20%
+        ("assets_growth", 0.10), ("loans_growth", 0.05),       # growth = 15%
+    ],
+}
 
 BANDS = [
     (0, 10e6, "< $10M"), (10e6, 50e6, "$10M–50M"), (50e6, 100e6, "$50M–100M"),
@@ -414,8 +423,9 @@ def growth_for(cycle, basis, cycle_sig):
 
 
 @st.cache_data(show_spinner=False)
-def enriched_table(cycle, basis, cycle_sig):
+def enriched_table(cycle, basis, lens, cycle_sig):
     df = metrics_table(cycle).merge(growth_for(cycle, basis, cycle_sig), on="cu", how="left")
+    weights = SCORE_LENSES[lens]
     # Recent acquirers (a CU they absorbed left the call reports in the last 4 quarters),
     # plus likely-but-unpublished mergers inferred from the call reports themselves.
     acq = merger_acquirers(cycle, cycle_sig)
@@ -428,7 +438,7 @@ def enriched_table(cycle, basis, cycle_sig):
     # for merger-bought growth. Direction-adjusted so positive always = better.
     acc = pd.Series(0.0, index=df.index)
     wsum = pd.Series(0.0, index=df.index)
-    for key, w in SCORE_WEIGHTS:
+    for key, w in weights:
         peers = df.loc[~is_acq]                           # clean baseline (no acquirers)
         stats = peers.groupby("band")[key].agg(["mean", "std"])
         mean = df.band.map(stats["mean"])
@@ -788,10 +798,10 @@ def comparison_frames(cus, mt, labels):
     return pd.DataFrame(disp).reindex(order), pd.DataFrame(raw).reindex(order)
 
 
-def score_breakdown(row):
+def score_breakdown(row, weights):
     rows = []
     is_acq = bool(row.get("is_acquirer"))
-    for key, w in SCORE_WEIGHTS:
+    for key, w in weights:
         z = row.get(f"z_{key}")
         if is_acq and key.endswith("_growth"):
             rows.append((META[key][0], fmt(key, row[key]), "excluded — merger", "—"))
@@ -827,7 +837,12 @@ cycle = st.sidebar.selectbox("Quarter", all_cycles)
 growth_label = st.sidebar.selectbox(
     "Growth basis", ["Year-over-year", "Quarter-over-quarter (annualized)"])
 basis = "YoY" if growth_label.startswith("Year") else "QoQ"
-mt = enriched_table(cycle, basis, sig)
+lens = st.sidebar.selectbox(
+    "Score lens", list(SCORE_LENSES),
+    help="Momentum weights growth heaviest (who's expanding fastest). Performance "
+         "weights earnings, capital, and asset quality (who's financially strongest).")
+weights = SCORE_LENSES[lens]
+mt = enriched_table(cycle, basis, lens, sig)
 
 # label helper shared across pages
 ALL_LABELS = {r.cu: f"{r.cu_name} (#{r.cu}, {r.state})" for r in mt.itertuples()}
@@ -867,36 +882,31 @@ if page == "Profile":
                 metric_card(c, key, row, prev_row)
             h[4].metric("Composite Score",
                         f"{row.score:.0f}/100" if pd.notna(row.score) else "—",
-                        help="Growth/momentum z-score blend vs the asset-band peer "
-                             "group; 50 = peer average.")
+                        help=f"{lens} z-score blend vs the asset-band peer group; "
+                             "50 = peer average.")
             st.markdown(
                 f"<div style='font-size:1.6rem;line-height:1.1'>{stars_str(row.stars)}"
                 "</div>", unsafe_allow_html=True)
-            cap = f"Momentum vs {row.band} peers — 50 = peer average."
+            cap = f"{lens} score vs {row.band} peers — 50 = peer average."
             if prev_row is not None:
                 cap += f"  ·  ▲▼ deltas vs prior quarter ({prev_cy})."
             st.caption(cap)
-
-            flags = compute_flags(row, mt)
-            if flags:
-                for sev, msg in flags:
-                    (st.error if sev == "error" else st.warning)(msg)
-            else:
-                st.success("No watch flags — capital, earnings, and asset quality look sound.")
+            with st.expander("How this score is built"):
+                st.dataframe(score_breakdown(row, weights), use_container_width=True,
+                             hide_index=True)
 
             tab_ov, tab_fin, tab_tr, tab_peer, tab_mrg = st.tabs(
                 ["Overview", "Financials", "Trends", "Peers", "Mergers"])
 
             # ===================================================== OVERVIEW
             with tab_ov:
-                with st.expander("How this score is built"):
-                    st.dataframe(score_breakdown(row), use_container_width=True,
-                                 hide_index=True)
                 scorecard_groups = [
-                    ("Size & membership", ["assets", "loans", "shares", "net_worth", "members"]),
-                    ("Earnings", ["roa", "roe", "nim", "net_income", "efficiency"]),
-                    ("Capital & asset quality", ["nw_ratio", "delinquency", "nco", "lts"]),
+                    ("Size & balance sheet",
+                     ["assets", "loans", "shares", "net_worth", "net_income", "members"]),
                     (f"Growth ({growth_label.lower()})", GROWTH_KEYS),
+                    ("Profitability", ["roa", "roe", "nim", "efficiency"]),
+                    ("Capital, asset quality & liquidity",
+                     ["nw_ratio", "delinquency", "nco", "lts"]),
                 ]
                 for title, keys in scorecard_groups:
                     st.markdown(f"**{title}**")
@@ -974,7 +984,7 @@ if page == "Profile":
                     tspan = tc1.radio("Period", ["Quarters", "Years"], horizontal=True)
                     chosen = tc2.multiselect(
                         "Metrics to chart", trend_opts,
-                        default=["assets", "roa", "efficiency", "delinquency"],
+                        default=trend_opts,
                         format_func=lambda k: META[k][0])
                     if tspan == "Years" and not tsd.empty:
                         tsd = tsd[[str(i).endswith("-12") for i in tsd.index]]
@@ -1077,13 +1087,18 @@ elif page == "Compare":
             file_name=f"cu_comparison_{cycle}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         if len(all_cycles) > 1:
-            st.subheader("Trend overlay")
-            ov_key = st.selectbox(
-                "Metric", [k for k, _, _, _ in METRICS if not k.endswith("_growth")],
-                format_func=lambda k: META[k][0], index=0)
-            series = multi_cu_series(picks, ov_key, ALL_LABELS, sig)
-            if not series.empty:
-                st.line_chart(series)
+            st.subheader("Trend overlays")
+            ov_opts = [k for k, _, _, _ in METRICS if not k.endswith("_growth")]
+            ov_keys = st.multiselect(
+                "Metrics to chart", ov_opts, default=ov_opts,
+                format_func=lambda k: META[k][0])
+            grid = st.columns(2)
+            for i, key in enumerate(ov_keys):
+                series = multi_cu_series(picks, key, ALL_LABELS, sig)
+                if not series.empty:
+                    with grid[i % 2]:
+                        st.caption(META[key][0])
+                        st.line_chart(series)
 
 # ============================================================ RANKINGS
 elif page == "Rankings":
@@ -1120,7 +1135,7 @@ elif page == "Rankings":
     view = view.dropna(subset=[rank_key]).sort_values(
         rank_key, ascending=order.startswith("Bottom")).head(int(top_n))
     if rank_key in ("score", "stars"):
-        show_keys = ["score", "stars"] + [k for k, _ in SCORE_WEIGHTS]
+        show_keys = ["score", "stars"] + [k for k, _ in weights]
     else:
         show_keys = ["score", "stars", "assets", "net_worth", "roa", "efficiency",
                      "nw_ratio", "delinquency"]
