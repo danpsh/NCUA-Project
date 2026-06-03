@@ -336,6 +336,164 @@ def cu_timeseries(cu, cycle_sig):
     return pd.DataFrame(rows).set_index("cycle") if rows else pd.DataFrame()
 
 
+# ---- Financial statements: line items -> verified NCUA account codes ----
+BALANCE_SHEET = [
+    ("Assets", "header", None),
+    ("Cash & equivalents", "sum", ["ACCT_730A", "ACCT_730B"]),
+    ("Loans & leases (gross)", "code", "ACCT_025B"),
+    ("Investments & all other assets", "res_assets", None),
+    ("Land & building", "code", "ACCT_007"),
+    ("Other fixed assets", "code", "ACCT_008"),
+    ("NCUA Share Insurance deposit", "code", "ACCT_794"),
+    ("Accrued interest & other assets", "sum", ["ACCT_009A", "ACCT_009B", "ACCT_009C"]),
+    ("Total assets", "code", "ACCT_010", True),
+    ("Liabilities & equity", "header", None),
+    ("Total shares & deposits", "code", "ACCT_018"),
+    ("Borrowings", "code", "ACCT_860C"),
+    ("Accounts payable & other liabilities", "code", "ACCT_825"),
+    ("Other liabilities", "res_liab", None),
+    ("Net worth (equity)", "code", "ACCT_997"),
+    ("Total liabilities, shares & equity", "code", "ACCT_014", True),
+]
+INCOME_STATEMENT = [
+    ("Interest on loans", "code", "ACCT_110"),
+    ("Income from investments", "code", "ACCT_120"),
+    ("Total interest income", "code", "ACCT_115", True),
+    ("Dividends on shares", "code", "ACCT_380"),
+    ("Interest on borrowed money", "code", "ACCT_340"),
+    ("Total interest expense", "code", "ACCT_350", True),
+    ("Net interest income", "nii", None, True),
+    ("Provision for credit losses (implied)", "prov", None),
+    ("Fee income", "code", "ACCT_131"),
+    ("Total non-interest income", "code", "ACCT_117", True),
+    ("Employee compensation & benefits", "code", "ACCT_210"),
+    ("Office occupancy", "code", "ACCT_250"),
+    ("Office operations", "code", "ACCT_260"),
+    ("Loan servicing", "code", "ACCT_280"),
+    ("Professional & outside services", "code", "ACCT_290"),
+    ("Educational & promotional", "code", "ACCT_270"),
+    ("Travel & conference", "code", "ACCT_230"),
+    ("Miscellaneous operating", "code", "ACCT_360"),
+    ("All other operating expense", "other_opex", None),
+    ("Total non-interest expense", "code", "ACCT_671", True),
+    ("Non-operating income (expense)", "code", "ACCT_440"),
+    ("Net income", "code", "ACCT_661A", True),
+]
+_OPEX_PARTS = ["ACCT_210", "ACCT_250", "ACCT_260", "ACCT_280", "ACCT_290",
+               "ACCT_270", "ACCT_230", "ACCT_360"]
+_ASSET_PARTS = ["ACCT_730A", "ACCT_730B", "ACCT_025B", "ACCT_007", "ACCT_008",
+                "ACCT_794", "ACCT_009A", "ACCT_009B", "ACCT_009C"]
+
+
+@st.cache_data(show_spinner=False)
+def cu_statement_raw(cu, cycle_sig):
+    """All FS220/FS220A account values per cycle for a CU and its charter family."""
+    alias = charter_alias(cycle_sig)
+    canon = alias.get(cu, cu)
+    family = {c for c in set(alias) | set(alias.values()) if alias.get(c, c) == canon}
+    family |= {cu, canon}
+    inlist = ",".join("'%s'" % c for c in family)
+    out = {}
+    for tbl in ("FS220", "FS220A"):
+        try:
+            df = con.execute(
+                f"SELECT * FROM read_parquet('{glob_for(tbl)}', hive_partitioning=true, "
+                f"union_by_name=true) WHERE CAST(CU_NUMBER AS VARCHAR) IN ({inlist})").df()
+        except Exception:
+            continue
+        acct = [c for c in df.columns if c.upper().startswith("ACCT_")]
+        for _, r in df.iterrows():
+            d = out.setdefault(str(r["cycle"]), {})
+            for c in acct:
+                try:
+                    d[c.upper()] = float(r[c])
+                except (TypeError, ValueError):
+                    pass
+    return out
+
+
+def _stmt_getter(raw, cyc, flow, mode):
+    """Return a function code->value; income (flow) items de-cumulate in Quarters mode."""
+    def stock(code):
+        return raw.get(cyc, {}).get(code)
+
+    def flow_(code):
+        v = raw.get(cyc, {}).get(code)
+        if v is None:
+            return None
+        if mode == "Years":
+            return v
+        yr, mm = cyc.split("-")
+        if mm == "03":
+            return v
+        pq = prior_cycle(cyc)
+        if pq and pq.split("-")[0] == yr:
+            return v - (raw.get(pq, {}).get(code) or 0)
+        return v
+    return flow_ if flow else stock
+
+
+def _line_value(kind, arg, g):
+    if kind == "code":
+        return g(arg)
+    if kind == "sum":
+        vals = [g(c) for c in arg if g(c) is not None]
+        return sum(vals) if vals else None
+    if kind == "nii":
+        a, b = g("ACCT_115"), g("ACCT_350")
+        return None if a is None and b is None else (a or 0) - (b or 0)
+    if kind == "prov":
+        ni = g("ACCT_661A")
+        if ni is None:
+            return None
+        nii = (g("ACCT_115") or 0) - (g("ACCT_350") or 0)
+        return (nii + (g("ACCT_117") or 0) - (g("ACCT_671") or 0) + (g("ACCT_440") or 0)) - ni
+    if kind == "other_opex":
+        tot = g("ACCT_671")
+        return None if tot is None else tot - sum((g(c) or 0) for c in _OPEX_PARTS)
+    if kind == "res_assets":
+        ta = g("ACCT_010")
+        return None if ta is None else ta - sum((g(c) or 0) for c in _ASSET_PARTS)
+    if kind == "res_liab":
+        tot = g("ACCT_014")
+        return None if tot is None else tot - sum(
+            (g(c) or 0) for c in ["ACCT_018", "ACCT_860C", "ACCT_825", "ACCT_997"])
+    return None
+
+
+def _period_label(cyc, mode):
+    y, m = cyc.split("-")
+    if mode == "Years":
+        return y
+    return f"{y} Q{ {'03': 1, '06': 2, '09': 3, '12': 4}[m] }"
+
+
+def build_statement(cu, schema, flow, mode, anchor, cycle_sig):
+    raw = cu_statement_raw(cu, cycle_sig)
+    cs = sorted(cycle_sig)
+    if mode == "Years":
+        periods = [c for c in cs if c.endswith("-12") and c <= anchor][-5:]
+    else:
+        periods = [c for c in cs if c <= anchor][-6:]
+    periods = periods[::-1]                       # newest first
+    if not periods:
+        return pd.DataFrame()
+    labels = [_period_label(p, mode) for p in periods]
+    out = []
+    for row in schema:
+        label, kind, arg = row[0], row[1], row[2]
+        if kind == "header":
+            out.append({"": label, **{lb: "" for lb in labels}})
+            continue
+        rec = {"": label}
+        for p, lb in zip(periods, labels):
+            g = _stmt_getter(raw, p, flow, mode)
+            v = _line_value(kind, arg, g)
+            rec[lb] = money(v) if v is not None else "—"
+        out.append(rec)
+    return pd.DataFrame(out)
+
+
 @st.cache_data(show_spinner="Building industry history…")
 def industry_timeseries(cycle_sig):
     rows = []
@@ -630,6 +788,25 @@ if page == "Profile":
                     f"SELECT * FROM read_parquet('{glob_for('FOICU')}', hive_partitioning=true, union_by_name=true) "
                     "WHERE cycle = ? AND CU_NUMBER = ?", [cycle, cu]).df()
                 st.dataframe(foicu.T, use_container_width=True)
+
+            st.subheader("Financial statements")
+            sc1, sc2 = st.columns(2)
+            stmt = sc1.radio("Statement", ["Balance sheet", "Income statement"], horizontal=True)
+            pmode = sc2.radio("Periods", ["Quarters", "Years"], horizontal=True)
+            schema = BALANCE_SHEET if stmt == "Balance sheet" else INCOME_STATEMENT
+            sdf = build_statement(cu, schema, stmt == "Income statement", pmode, cycle, sig)
+            if sdf.empty:
+                st.info("No statement data available for this credit union and period.")
+            else:
+                st.dataframe(sdf, use_container_width=True, hide_index=True,
+                             height=38 * len(sdf) + 38)
+                note = ("Built from NCUA call report accounts and tied to the reported totals. "
+                        "Lines marked “implied” (investments, provision for credit losses, other) "
+                        "are derived so the statement foots exactly.")
+                if stmt == "Income statement":
+                    note += (" Income figures are year-to-date in the call report; the Quarters "
+                             "view de-cumulates them into standalone quarters.")
+                st.caption(note)
 
             mg = merger_table(sig)
             if not mg.empty:
