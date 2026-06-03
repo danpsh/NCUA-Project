@@ -896,27 +896,71 @@ def _ys_ratios(cur, pye, factor):
 
 
 @st.cache_data(show_spinner=False)
+def ys_point(cu, cycle, cycle_sig):
+    """Yield & spread ratios for one CU at one cycle -> (ratios_dict, used_avg),
+    or None if there's no data. Averages use (cycle + prior year-end) ÷ 2."""
+    cur = acct_values(cu, cycle, cycle_sig)
+    if not cur:
+        return None
+    pye_c = f"{int(cycle[:4]) - 1}-12"
+    pye = acct_values(cu, pye_c, cycle_sig) if pye_c in cycle_sig else None
+    return _ys_ratios(cur, pye, 12 / int(cycle[-2:])), (pye is not None)
+
+
+@st.cache_data(show_spinner=False)
 def yield_spread(cu, cycle, cycle_sig):
     """Yield & spread for one CU at `cycle`, plus the same period one year earlier
     (for pp deltas). `used_avg` is False when no prior year-end is in range."""
-    def figs_for(c):
-        cur = acct_values(cu, c, cycle_sig)
-        if not cur:
-            return None
-        pye_c = f"{int(c[:4]) - 1}-12"
-        pye = acct_values(cu, pye_c, cycle_sig) if pye_c in cycle_sig else None
-        return _ys_ratios(cur, pye, 12 / int(c[-2:])), (pye is not None)
-
-    now = figs_for(cycle)
+    now = ys_point(cu, cycle, cycle_sig)
     if now is None or now[0]["yl"] is None:
         return None
     cur_figs, used_avg = now
-    prior = figs_for(f"{int(cycle[:4]) - 1}-{cycle[-2:]}")
+    prior = ys_point(cu, f"{int(cycle[:4]) - 1}-{cycle[-2:]}", cycle_sig)
     return {"cur": cur_figs, "prior": (prior[0] if prior else None),
             "used_avg": used_avg, "factor": 12 / int(cycle[-2:])}
 
 
-def render_yield_spread(cu, cycle, cycle_sig):
+# Rows for the yield & spread trend table (grouped like the financial statements).
+_YS_ROWS = [
+    ("Asset yields", None, "header"),
+    ("Yield on loans", "yl", None),
+    ("Yield on investments", "yi", None),
+    ("Yield on earning assets", "yea", None),
+    ("Funding & margin", None, "header"),
+    ("Cost of funds", "cof", None),
+    ("Net interest spread", "spread", None),
+    ("Net interest margin", "nim", None),
+]
+
+
+def build_yield_spread_table(cu, mode, anchor, cycle_sig):
+    """Yield & spread over time: rows = ratios, columns = periods (newest first),
+    mirroring build_statement's period selection. Every period shows the annualized
+    year-to-date ratio (NCUA FPR basis) — ratios are not de-cumulated."""
+    cs = sorted(cycle_sig)
+    if mode == "Years":
+        periods = [c for c in cs if c.endswith("-12") and c <= anchor][-5:]
+    else:
+        periods = [c for c in cs if c <= anchor][-6:]
+    periods = periods[::-1]
+    if not periods:
+        return pd.DataFrame()
+    labels = [_period_label(p, mode) for p in periods]
+    pts = {p: (ys_point(cu, p, cycle_sig) or (None,))[0] for p in periods}
+    out = []
+    for label, key, kind in _YS_ROWS:
+        if kind == "header":
+            out.append({"": label, **{lb: "" for lb in labels}})
+            continue
+        rec = {"": label}
+        for p, lb in zip(periods, labels):
+            v = pts[p].get(key) if pts[p] else None
+            rec[lb] = pct(v) if v is not None else "—"
+        out.append(rec)
+    return pd.DataFrame(out)
+
+
+def render_yield_spread(cu, cycle, cycle_sig, mode="Quarters"):
     ys = yield_spread(cu, cycle, cycle_sig)
     if not ys:
         return
@@ -940,16 +984,22 @@ def render_yield_spread(cu, cycle, cycle_sig):
     card(r2[1], "Net interest spread", "spread")
     card(r2[2], "Net interest margin", "nim")
 
-    basis = ("average balances — (current quarter + prior year-end) ÷ 2"
+    tbl = build_yield_spread_table(cu, mode, cycle, cycle_sig)
+    if not tbl.empty and len(tbl.columns) > 2:        # only worth a table with ≥2 periods
+        st.dataframe(tbl, use_container_width=True, hide_index=True,
+                     height=38 * len(tbl) + 38)
+
+    basis = ("average balances — (period + prior year-end) ÷ 2"
              if ys["used_avg"] else "period-end balances (no prior year-end in range)")
     st.caption(
-        f"Annualized (×{ys['factor']:.4g}) interest income and expense over {basis}. "
-        "Yield on investments uses total investments plus cash on deposit, derived as "
-        "assets net of loans, fixed assets, the NCUSIF deposit and cash on hand. Cost of "
-        "funds is total interest expense over average shares + borrowings; net interest "
-        "spread is the earning-asset yield minus cost of funds. Net interest margin is "
-        "net interest income over average assets, per the NCUA FPR method. Deltas are "
-        "vs. one year prior.")
+        f"Income annualized over {basis}. Yield on investments uses total investments plus "
+        "cash on deposit, derived as assets net of loans, fixed assets, the NCUSIF deposit "
+        "and cash on hand. Cost of funds is total interest expense over average shares + "
+        "borrowings; net interest spread is the earning-asset yield minus cost of funds; net "
+        "interest margin is net interest income over average assets (NCUA FPR method). The "
+        "cards’ deltas are vs. one year prior. In the trend table each quarter is the "
+        "annualized year-to-date ratio — unlike the income statement, ratios are not "
+        "de-cumulated into standalone quarters.")
 
 
 @st.cache_data(show_spinner="Building industry history…")
@@ -1315,7 +1365,7 @@ if page == "Profile":
                     st.caption(note)
 
                 st.divider()
-                render_yield_spread(cu, cycle, sig)
+                render_yield_spread(cu, cycle, sig, pmode)
 
                 st.divider()
                 vals = acct_values(cu, cycle, sig)
