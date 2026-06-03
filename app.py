@@ -838,6 +838,109 @@ def build_statement(cu, schema, flow, mode, anchor, cycle_sig):
     return pd.DataFrame(out)
 
 
+# ---- Yield & spread decomposition ----------------------------------------
+# Splits the net interest margin into its drivers: what the credit union earns on
+# loans vs. investments, and what it pays for funding. Average balances follow the
+# NCUA FPR convention (current period + prior year-end) ÷ 2; income is annualized.
+# Total investments are not a single FS220/FS220A line, so the investment+cash base
+# is derived as total assets net of loans, cash on hand, fixed assets, the NCUSIF
+# deposit, and accrued/other assets (mirrors the balance-sheet residual).
+_NONINV_ASSET = ["ACCT_025B", "ACCT_730A", "ACCT_007", "ACCT_008", "ACCT_794",
+                 "ACCT_009A", "ACCT_009B", "ACCT_009C"]
+
+
+def _inv_base(v):
+    ta = v.get("ACCT_010")
+    if ta is None:
+        return None
+    return ta - sum((v.get(c) or 0) for c in _NONINV_ASSET)
+
+
+def _ys_ratios(cur, pye, factor):
+    """Yield & spread figures from current + prior-year-end account dicts.
+    pye may be None -> point-in-time balances are used as the 'average'."""
+    g = lambda d, c: (d.get(c) or 0.0) if d else 0.0
+
+    def avg(c):
+        return (g(cur, c) + g(pye, c)) / 2 if pye else g(cur, c)
+
+    def rate(num, den):
+        return num * factor / den * 100 if den and den > 0 else None
+
+    avg_loans = avg("ACCT_025B") + avg("ACCT_003")          # incl. loans held for sale
+    ib_cur, ib_pye = _inv_base(cur), (_inv_base(pye) if pye else None)
+    avg_inv = (((ib_cur or 0) + (ib_pye or 0)) / 2) if pye else (ib_cur or 0)
+    avg_ea = avg_loans + avg_inv
+    avg_fund = avg("ACCT_018") + avg("ACCT_860C")           # shares + borrowings
+    avg_assets = avg("ACCT_010")
+
+    yl = rate(g(cur, "ACCT_110") - g(cur, "ACCT_119"), avg_loans)   # interest on loans
+    yi = rate(g(cur, "ACCT_120"), avg_inv)                          # income from investments
+    yea = rate(g(cur, "ACCT_115"), avg_ea)                          # total interest income
+    cof = rate(g(cur, "ACCT_350"), avg_fund)                        # total interest expense
+    nim = rate(g(cur, "ACCT_115") - g(cur, "ACCT_350"), avg_assets)
+    spread = (yea - cof) if (yea is not None and cof is not None) else None
+    return {"yl": yl, "yi": yi, "yea": yea, "cof": cof, "spread": spread, "nim": nim,
+            "avg_ea": avg_ea, "avg_assets": avg_assets}
+
+
+@st.cache_data(show_spinner=False)
+def yield_spread(cu, cycle, cycle_sig):
+    """Yield & spread for one CU at `cycle`, plus the same period one year earlier
+    (for pp deltas). `used_avg` is False when no prior year-end is in range."""
+    def figs_for(c):
+        cur = acct_values(cu, c, cycle_sig)
+        if not cur:
+            return None
+        pye_c = f"{int(c[:4]) - 1}-12"
+        pye = acct_values(cu, pye_c, cycle_sig) if pye_c in cycle_sig else None
+        return _ys_ratios(cur, pye, 12 / int(c[-2:])), (pye is not None)
+
+    now = figs_for(cycle)
+    if now is None or now[0]["yl"] is None:
+        return None
+    cur_figs, used_avg = now
+    prior = figs_for(f"{int(cycle[:4]) - 1}-{cycle[-2:]}")
+    return {"cur": cur_figs, "prior": (prior[0] if prior else None),
+            "used_avg": used_avg, "factor": 12 / int(cycle[-2:])}
+
+
+def render_yield_spread(cu, cycle, cycle_sig):
+    ys = yield_spread(cu, cycle, cycle_sig)
+    if not ys:
+        return
+    cur, prior = ys["cur"], ys["prior"]
+    st.markdown("**Yield & spread**")
+
+    def card(col, label, key, good_high=True):
+        v = cur.get(key)
+        d = None
+        if prior and prior.get(key) is not None and v is not None:
+            d = f"{v - prior[key]:+.2f} pp"
+        col.metric(label, pct(v), delta=d,
+                   delta_color=(("normal" if good_high else "inverse") if d else "normal"))
+
+    r1 = st.columns(3)
+    card(r1[0], "Yield on loans", "yl")
+    card(r1[1], "Yield on investments", "yi")
+    card(r1[2], "Yield on earning assets", "yea")
+    r2 = st.columns(3)
+    card(r2[0], "Cost of funds", "cof", good_high=False)
+    card(r2[1], "Net interest spread", "spread")
+    card(r2[2], "Net interest margin", "nim")
+
+    basis = ("average balances — (current quarter + prior year-end) ÷ 2"
+             if ys["used_avg"] else "period-end balances (no prior year-end in range)")
+    st.caption(
+        f"Annualized (×{ys['factor']:.4g}) interest income and expense over {basis}. "
+        "Yield on investments uses total investments plus cash on deposit, derived as "
+        "assets net of loans, fixed assets, the NCUSIF deposit and cash on hand. Cost of "
+        "funds is total interest expense over average shares + borrowings; net interest "
+        "spread is the earning-asset yield minus cost of funds. Net interest margin is "
+        "net interest income over average assets and can differ slightly from the "
+        "scorecard NIM, which uses period-end assets. Deltas are vs. one year prior.")
+
+
 @st.cache_data(show_spinner="Building industry history…")
 def industry_timeseries(cycle_sig):
     rows = []
@@ -1199,6 +1302,9 @@ if page == "Profile":
                         note += (" Income figures are year-to-date in the call report; the "
                                  "Quarters view de-cumulates them into standalone quarters.")
                     st.caption(note)
+
+                st.divider()
+                render_yield_spread(cu, cycle, sig)
 
                 st.divider()
                 vals = acct_values(cu, cycle, sig)
