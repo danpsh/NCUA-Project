@@ -59,11 +59,14 @@ META["score"] = ("Composite Score", "score", "high")
 META["stars"] = ("Star Rating", "stars", "high")
 GROWTH_KEYS = ["assets_growth", "members_growth", "loans_growth", "shares_growth"]
 
-# Composite score: weighted blend of band-relative percentiles (capital, earnings,
-# efficiency, asset quality, growth). Weights sum to 1.0.
+# Composite score — GROWTH / MOMENTUM lens: growth weighted heaviest, then
+# earnings, with a light asset-quality guardrail. Weights sum to 1.0.
 SCORE_WEIGHTS = [
-    ("roa", 0.25), ("nw_ratio", 0.20), ("efficiency", 0.20),
-    ("delinquency", 0.15), ("nco", 0.10), ("assets_growth", 0.10),
+    ("assets_growth", 0.20), ("loans_growth", 0.15),
+    ("members_growth", 0.10), ("shares_growth", 0.10),   # growth = 55%
+    ("roa", 0.20), ("nim", 0.10),                          # earnings = 30%
+    ("efficiency", 0.10),                                  # operating leverage = 10%
+    ("delinquency", 0.05),                                 # asset-quality guardrail = 5%
 ]
 
 BANDS = [
@@ -125,10 +128,18 @@ def stars_str(n):
     return "★" * n + "☆" * (5 - n)
 
 
-def stars_from_score(s):
-    if pd.isna(s):
+def stars_from_z(z):
+    if pd.isna(z):
         return np.nan
-    return min(5, max(1, int(s // 20) + 1))  # 0-20→1 … 80-100→5
+    if z >= 0.6:
+        return 5
+    if z >= 0.2:
+        return 4
+    if z >= -0.2:
+        return 3
+    if z >= -0.6:
+        return 2
+    return 1
 
 
 def fmt(key, x):
@@ -250,17 +261,23 @@ def growth_for(cycle, basis, cycle_sig):
 @st.cache_data(show_spinner=False)
 def enriched_table(cycle, basis, cycle_sig):
     df = metrics_table(cycle).merge(growth_for(cycle, basis, cycle_sig), on="cu", how="left")
-    # Composite score: weighted blend of band-relative "goodness" percentiles.
+    # Composite score: weighted blend of band-relative z-scores (SDs from the
+    # asset-band peer mean). Direction-adjusted so positive always = better.
     acc = pd.Series(0.0, index=df.index)
     wsum = pd.Series(0.0, index=df.index)
     for key, w in SCORE_WEIGHTS:
-        pr = df.groupby("band")[key].rank(pct=True)          # 0–1 within asset band
-        good = pr if META[key][2] == "high" else 1 - pr      # flip low-is-better metrics
-        df[f"g_{key}"] = good
-        acc = acc + good.fillna(0) * w
-        wsum = wsum + good.notna().astype(float) * w
-    df["score"] = (acc / wsum * 100).where(wsum > 0)
-    df["stars"] = df["score"].apply(stars_from_score)
+        grp = df.groupby("band")[key]
+        std = grp.transform("std")
+        z = (df[key] - grp.transform("mean")) / std
+        z = z.where(std > 0)                              # undefined where no spread
+        if META[key][2] == "low":
+            z = -z                                        # lower is better → flip sign
+        df[f"z_{key}"] = z
+        acc = acc + z.fillna(0) * w
+        wsum = wsum + z.notna().astype(float) * w
+    df["score_z"] = (acc / wsum).where(wsum > 0)          # weighted composite z
+    df["score"] = (50 + 30 * df["score_z"]).clip(0, 100)  # 50 = peer average
+    df["stars"] = df["score_z"].apply(stars_from_z)
     return df
 
 
@@ -332,10 +349,10 @@ def comparison_frames(cus, mt, labels):
 def score_breakdown(row):
     rows = []
     for key, w in SCORE_WEIGHTS:
-        g = row.get(f"g_{key}")
+        z = row.get(f"z_{key}")
         rows.append((META[key][0], fmt(key, row[key]),
-                     f"{g * 100:.0f}th" if pd.notna(g) else "—", f"{w * 100:.0f}%"))
-    return pd.DataFrame(rows, columns=["Metric", "Value", "Band percentile", "Weight"])
+                     f"{z:+.2f} SD" if pd.notna(z) else "—", f"{w * 100:.0f}%"))
+    return pd.DataFrame(rows, columns=["Metric", "Value", "Peer z-score", "Weight"])
 
 
 def multi_cu_series(cus, metric, labels, cycle_sig):
@@ -394,8 +411,9 @@ with profile_tab:
                 st.markdown(
                     f"<div style='font-size:2.2rem;line-height:1'>{stars_str(row.stars)}</div>",
                     unsafe_allow_html=True)
-                st.caption(f"Overall performance vs the {row.band} asset peer group, "
-                           "weighting earnings, capital, efficiency, asset quality, and growth.")
+                st.caption(f"Growth/momentum score vs the {row.band} asset peer group — "
+                           "a z-score blend weighting growth and earnings most heavily. "
+                           "50 = peer average; higher means stronger momentum.")
             with st.expander("How this score is built"):
                 st.dataframe(score_breakdown(row), use_container_width=True, hide_index=True)
 
