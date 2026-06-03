@@ -223,6 +223,52 @@ def color_scale(series, direction):
     return css
 
 
+PEER_BAR_CSS = """<style>
+.pb-wrap{font-size:0.9rem;margin-top:.25rem}
+.pb-row{display:grid;grid-template-columns:165px 90px 90px 1fr;align-items:center;
+        gap:12px;padding:5px 0;border-top:1px solid #eef0f2}
+.pb-head{font-size:.75rem;color:#9097a1;text-transform:uppercase;letter-spacing:.04em;
+         border-top:none}
+.pb-lbl{color:#374151}
+.pb-num{text-align:right;font-variant-numeric:tabular-nums}
+.pb-val{font-weight:600}
+.pb-track{position:relative;height:14px;background:#f1f3f5;border-radius:7px}
+.pb-iqr{position:absolute;top:3px;height:8px;background:#ccd6e4;border-radius:4px}
+.pb-med{position:absolute;top:-1px;width:2px;height:16px;background:#6b7280}
+.pb-dot{position:absolute;top:1px;width:12px;height:12px;border-radius:50%;
+        transform:translateX(-6px);border:2px solid #fff;box-shadow:0 0 2px rgba(0,0,0,.35)}
+</style>"""
+
+
+def peer_bars_html(items):
+    """Render a small-multiple of peer-distribution bars. Each item:
+    {label, value, median, stats|None}. stats: {min,p25,median,max,value,better}.
+    Track = peer min..max, shaded band = middle 50%, tick = median, dot = this CU
+    (green if better than the peer median, red if worse)."""
+    head = ("<div class='pb-row pb-head'><div>Metric</div>"
+            "<div class='pb-num'>This CU</div><div class='pb-num'>Peer median</div>"
+            "<div>Position in peer range (●=this CU, ▏=median, band=middle 50%)</div></div>")
+    rows = [head]
+    for it in items:
+        lbl, vstr, mstr, s = it["label"], it["value"], it["median"], it["stats"]
+        if s is None:
+            bar = "<div class='pb-track'></div>"
+        else:
+            rng = (s["max"] - s["min"]) or 1
+            def pos(x):
+                return max(0.0, min(100.0, (x - s["min"]) / rng * 100))
+            q1, q3, med, val = pos(s["p25"]), pos(s["p75"]), pos(s["median"]), pos(s["value"])
+            color = "#16a34a" if s["better"] else "#dc2626"
+            bar = (f"<div class='pb-track'>"
+                   f"<div class='pb-iqr' style='left:{q1:.1f}%;width:{max(0.6, q3 - q1):.1f}%'></div>"
+                   f"<div class='pb-med' style='left:{med:.1f}%'></div>"
+                   f"<div class='pb-dot' style='left:{val:.1f}%;background:{color}'></div></div>")
+        rows.append(f"<div class='pb-row'><div class='pb-lbl'>{lbl}</div>"
+                    f"<div class='pb-num pb-val'>{vstr}</div>"
+                    f"<div class='pb-num'>{mstr}</div>{bar}</div>")
+    return PEER_BAR_CSS + "<div class='pb-wrap'>" + "".join(rows) + "</div>"
+
+
 def to_excel_bytes(sheets):
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as xw:
@@ -965,25 +1011,28 @@ if page == "Profile":
                 if len(peers) >= 2:
                     ratio_keys = ["roa", "roe", "nim", "efficiency", "nw_ratio", "lts",
                                   "delinquency", "nco"] + GROWTH_KEYS
-                    bench = []
+                    items = []
                     for key in ratio_keys:
                         lbl, _, dirn = META[key]
                         v = row[key]
                         s = peers[key].dropna()
-                        if pd.isna(v) or s.empty:
-                            bench.append((lbl, fmt(key, v), "—", "—"))
+                        if pd.isna(v) or len(s) < 2:
+                            items.append({"label": lbl, "value": fmt(key, v),
+                                          "median": "—", "stats": None})
                             continue
                         med = s.median()
-                        if dirn == "high":
-                            rank = f"better than {(s < v).mean() * 100:.0f}% of peers"
-                        elif dirn == "low":
-                            rank = f"better than {(s > v).mean() * 100:.0f}% of peers"
-                        else:
-                            rank = f"{(s < v).mean() * 100:.0f}th percentile"
-                        bench.append((lbl, fmt(key, v), fmt(key, med), rank))
-                    st.dataframe(pd.DataFrame(
-                        bench, columns=["Metric", "This CU", "Peer median", "Standing"]),
-                        use_container_width=True, hide_index=True)
+                        better = (v >= med) if dirn != "low" else (v <= med)
+                        items.append({"label": lbl, "value": fmt(key, v),
+                                      "median": fmt(key, med),
+                                      "stats": {"min": float(s.min()), "max": float(s.max()),
+                                                "p25": float(s.quantile(.25)),
+                                                "p75": float(s.quantile(.75)),
+                                                "median": float(med), "value": float(v),
+                                                "better": bool(better)}})
+                    st.markdown(peer_bars_html(items), unsafe_allow_html=True)
+                    st.caption("Green dot = better than the peer median, red = worse "
+                               "(direction-adjusted, so lower is 'better' for efficiency, "
+                               "delinquency, and charge-offs).")
                 else:
                     st.info("Pick at least one peer to benchmark against.")
                 with st.expander("Identity / FOICU fields"):
