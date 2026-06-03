@@ -312,6 +312,24 @@ def industry_timeseries(cycle_sig):
     return pd.DataFrame(rows).set_index("cycle")
 
 
+@st.cache_data(show_spinner=False)
+def disappeared(cycle, vs, cycle_sig):
+    """CUs present in the comparison quarter but gone by `cycle` — i.e. merged
+    or liquidated in between. `vs` = 'prior quarter' or 'year ago'."""
+    cs = sorted(cycle_sig)
+    if cycle not in cs:
+        return pd.DataFrame()
+    base = yoy_cycle(cycle) if vs == "year ago" else prior_cycle(cycle)
+    if base is None:
+        return pd.DataFrame()
+    current = set(metrics_table(cycle).cu)
+    before = metrics_table(base)
+    gone = before[~before.cu.isin(current)].copy()
+    gone["last_cycle"] = base
+    return gone[["cu", "cu_name", "state", "assets", "members", "last_cycle"]] \
+        .sort_values("assets", ascending=False)
+
+
 def compute_flags(row, mt):
     flags = []
     if pd.notna(row.nw_ratio):
@@ -635,6 +653,24 @@ elif page == "Movers":
         with b:
             st.markdown("**Biggest decliners**")
             st.dataframe(fmt_movers(lose), use_container_width=True, hide_index=True)
+
+    st.divider()
+    st.subheader("Recent exits — merged or liquidated")
+    vs = st.radio("Compared to", ["prior quarter", "year ago"], horizontal=True)
+    gone = disappeared(cycle, vs, sig)
+    if gone.empty:
+        st.info("No comparison quarter available, or no exits detected.")
+    else:
+        st.caption(f"{len(gone):,} credit unions were in the {gone.last_cycle.iloc[0]} data "
+                   f"but gone by {cycle} — i.e. they merged or were liquidated in between. "
+                   "Charter disappearance can't distinguish a merger from a liquidation, or name "
+                   "the acquirer — the NCUA Insurance Report of Activity adds that.")
+        ex = pd.DataFrame({
+            "Credit Union": gone.cu_name.values, "State": gone.state.values,
+            "Last assets": [money(x) for x in gone.assets.values],
+            "Last members": [intfmt(x) for x in gone.members.values],
+            "Last seen": gone.last_cycle.values})
+        st.dataframe(ex, use_container_width=True, hide_index=True, height=460)
 
 # ============================================================ INDUSTRY
 elif page == "Industry":
