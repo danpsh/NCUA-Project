@@ -456,6 +456,31 @@ def enriched_table(cycle, basis, lens, cycle_sig):
     return df
 
 
+@st.cache_data(show_spinner="Computing score history…")
+def score_history(cu, basis, lens, cycle, cycle_sig):
+    """Composite score, stars, and all-CU percentile at each year-end (plus the
+    selected quarter), following the charter family across conversions."""
+    cs = sorted(cycle_sig)
+    picks = [c for c in cs if c.endswith("-12")]
+    if cycle in cs and cycle not in picks:
+        picks.append(cycle)
+    picks = sorted(set(picks))
+    alias = charter_alias(cycle_sig)
+    canon = alias.get(cu, cu)
+    family = {c for c in set(alias) | set(alias.values())
+              if alias.get(c, c) == canon} | {cu, canon}
+    rows = []
+    for c in picks:
+        et = enriched_table(c, basis, lens, cycle_sig)
+        r = et[et.cu.isin(family)]
+        if r.empty or pd.isna(r.iloc[0].score):
+            continue
+        s = float(r.iloc[0].score)
+        rows.append({"cycle": c, "score": s, "stars": r.iloc[0].stars,
+                     "pct": float((et.score < s).mean() * 100)})
+    return pd.DataFrame(rows).set_index("cycle") if rows else pd.DataFrame()
+
+
 @st.cache_data(show_spinner=False)
 def cu_timeseries(cu, cycle_sig):
     alias = charter_alias(cycle_sig)
@@ -908,11 +933,35 @@ if page == "Profile":
                     ("Capital, asset quality & liquidity",
                      ["nw_ratio", "delinquency", "nco", "lts"]),
                 ]
-                for title, keys in scorecard_groups:
+                for i, (title, keys) in enumerate(scorecard_groups):
+                    if i:
+                        st.divider()
                     st.markdown(f"**{title}**")
                     cols = st.columns(len(keys))
                     for col, key in zip(cols, keys):
                         metric_card(col, key, row, prev_row)
+
+                st.divider()
+                st.markdown("**Composite score history**")
+                hist = score_history(cu, basis, lens, cycle, sig)
+                if len(hist) > 1:
+                    labels = [c[:4] if c.endswith("-12") else c for c in hist.index]
+                    chart_df = pd.DataFrame({"Composite Score": hist.score.values}, index=labels)
+                    st.line_chart(chart_df, y="Composite Score")
+                    htbl = pd.DataFrame({
+                        "Period": labels,
+                        "Composite Score": [f"{v:.0f}" for v in hist.score],
+                        "Stars": [stars_str(v) for v in hist.stars],
+                        "Percentile (all CUs)": [f"{v:.0f}%" for v in hist.pct],
+                    })
+                    st.dataframe(htbl, use_container_width=True, hide_index=True)
+                    st.caption(f"{lens} composite at each year-end (plus the selected "
+                               "quarter). Percentile = share of all credit unions outscored "
+                               "that period. History follows the charter across conversions.")
+                else:
+                    st.caption("Composite history needs more than one period of data.")
+
+                st.divider()
                 sc = pd.DataFrame(
                     {"Value": {META[k][0]: fmt(k, row[k]) for k, _, _, _ in METRICS}})
                 st.download_button(
