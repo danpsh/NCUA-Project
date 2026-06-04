@@ -1520,6 +1520,30 @@ def universe_picker(df, key):
     return df, "all credit unions"
 
 
+def screen_filters(df, key, default_top=100):
+    """State(s) + Asset size multiselects and a Show-top control, matching the
+    Rankings page. Both multiselects are optional (empty = all). Returns
+    (filtered_df, top_n, human_label)."""
+    f1, f2, f3 = st.columns([2, 2, 1])
+    all_states = sorted(s for s in df.state.dropna().unique() if s)
+    sel_states = f1.multiselect("State(s)", all_states, default=[], key=f"{key}_states")
+    sel_bands = f2.multiselect("Asset size", [b[2] for b in BANDS], default=[],
+                               key=f"{key}_bands")
+    top_n = f3.number_input("Show top", min_value=10, max_value=2000,
+                            value=default_top, step=10, key=f"{key}_top")
+    out = df
+    if sel_states:
+        out = out[out.state.isin(sel_states)]
+    if sel_bands:
+        out = out[out.band.isin(sel_bands)]
+    parts = []
+    if sel_states:
+        parts.append(", ".join(sel_states))
+    if sel_bands:
+        parts.append(", ".join(sel_bands))
+    return out, int(top_n), (" · ".join(parts) if parts else "all credit unions")
+
+
 # ============================================================ PROFILE
 if page == "Profile":
     query = st.text_input("Search a credit union by name", value="BluCurrent",
@@ -2098,19 +2122,18 @@ elif page == "Yields":
     if rt.empty:
         st.info("No rate data available for this quarter.")
     else:
-        sub, label = universe_picker(rt, "rates")
+        sub, top_n, label = screen_filters(rt, "rates")
         labels = {k: lbl for k, lbl, _ in RATE_COLS}
         dirs = {k: d for k, _, d in RATE_COLS}
-        c1, c2, c3 = st.columns([2, 1, 1])
-        rank_key = c1.selectbox("Rank by", [k for k, _, _ in RATE_COLS],
+        g1, g2 = st.columns([2, 1])
+        rank_key = g1.selectbox("Rank by", [k for k, _, _ in RATE_COLS],
                                 format_func=lambda k: labels[k])
-        order = c2.radio("Order", ["Top", "Bottom"],
+        order = g2.radio("Order", ["Top (high→low)", "Bottom (low→high)"],
                          index=0 if dirs[rank_key] == "high" else 1, horizontal=True)
-        top_n = c3.number_input("Show", 10, 2000, 100, 10)
         v = sub.dropna(subset=[rank_key]).sort_values(
-            rank_key, ascending=(order == "Bottom")).head(int(top_n))
+            rank_key, ascending=order.startswith("Bottom")).head(top_n)
         if v.empty:
-            st.info("No credit unions with valid figures in this universe.")
+            st.info("No credit unions with valid figures for this filter.")
         else:
             disp = pd.DataFrame({"Credit Union": v.cu_name.values, "State": v.state.values,
                                  "Assets ($M)": (v.assets / 1e6).values})
@@ -2120,7 +2143,7 @@ elif page == "Yields":
                 colcfg[lbl] = st.column_config.NumberColumn(lbl, format="%.2f%%")
             disp.insert(0, "Rank", range(1, len(disp) + 1))
             colcfg["Rank"] = st.column_config.NumberColumn("Rank", format="%d", width="small")
-            st.caption(f"{len(v):,} of {len(sub):,} credit unions in {label}, {cycle}, ranked "
+            st.caption(f"{len(v):,} of {len(sub):,} credit unions ({label}), {cycle}, ranked "
                        f"by **{labels[rank_key]}**. Yields on the NCUA FPR average-balance "
                        "basis ((current + prior year-end) ÷ 2); cost of funds is total interest "
                        "expense over average shares + borrowings. Click any header to re-sort.")
