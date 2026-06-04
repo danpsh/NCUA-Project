@@ -280,22 +280,27 @@ PEER_BAR_CSS = """<style>
 
 def peer_bars_html(items):
     """Render a small-multiple of peer-distribution bars. Each item:
-    {label, value, median, stats|None}. stats: {min,p25,median,max,value,better}.
-    Track = peer min..max, shaded band = middle 50%, tick = median, dot = this CU
-    (green if better than the peer median, red if worse)."""
+    {label, value, median, stats|None}. stats: {lo,hi,p25,p75,median,value,better}.
+    Track spans the peer 5th–95th percentile (trimmed so a few extreme outliers —
+    common in growth metrics — don't compress the whole distribution to one edge);
+    shaded band = middle 50%, tick = median, dot = this CU (green if better than the
+    peer median, red if worse). A dot pinned to an edge means this CU is beyond the
+    trimmed range."""
     head = ("<div class='pb-row pb-head'><div>Metric</div>"
             "<div class='pb-num'>This CU</div><div class='pb-num'>Peer median</div>"
-            "<div>Position in peer range (●=this CU, ▏=median, band=middle 50%)</div></div>")
+            "<div>Position in peer range, 5th–95th pct "
+            "(●=this CU, ▏=median, band=middle 50%)</div></div>")
     rows = [head]
     for it in items:
         lbl, vstr, mstr, s = it["label"], it["value"], it["median"], it["stats"]
         if s is None:
             bar = "<div class='pb-track'></div>"
         else:
-            rng = (s["max"] - s["min"]) or 1
+            rng = (s["hi"] - s["lo"]) or 1
             def pos(x):
-                return max(0.0, min(100.0, (x - s["min"]) / rng * 100))
-            q1, q3, med, val = pos(s["p25"]), pos(s["p75"]), pos(s["median"]), pos(s["value"])
+                return max(0.0, min(100.0, (x - s["lo"]) / rng * 100))
+            q1, q3, med = pos(s["p25"]), pos(s["p75"]), pos(s["median"])
+            val = max(1.5, min(98.5, pos(s["value"])))        # keep dot fully on-track
             color = "#16a34a" if s["better"] else "#dc2626"
             bar = (f"<div class='pb-track'>"
                    f"<div class='pb-iqr' style='left:{q1:.1f}%;width:{max(0.6, q3 - q1):.1f}%'></div>"
@@ -1594,9 +1599,13 @@ if page == "Profile":
                             continue
                         med = s.median()
                         better = (v >= med) if dirn != "low" else (v <= med)
+                        lo, hi = float(s.quantile(.05)), float(s.quantile(.95))
+                        if hi <= lo:                       # little spread -> use full range
+                            lo, hi = float(s.min()), float(s.max())
                         items.append({"label": lbl, "value": fmt(key, v),
                                       "median": fmt(key, med),
-                                      "stats": {"min": float(s.min()), "max": float(s.max()),
+                                      "stats": {"lo": lo, "hi": hi,
+                                                "min": float(s.min()), "max": float(s.max()),
                                                 "p25": float(s.quantile(.25)),
                                                 "p75": float(s.quantile(.75)),
                                                 "median": float(med), "value": float(v),
