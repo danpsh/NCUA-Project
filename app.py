@@ -1433,13 +1433,13 @@ page = st.sidebar.radio("View", NAV, format_func=lambda p: f"{NAV_ICON[p]}  {p}"
                         label_visibility="collapsed")
 
 
-def pick(label, options, key, fmt=None, help=None):
-    """Tap-to-select control matching the nav's style: segmented pills where the
-    Streamlit version supports them, otherwise a radio. Persists via session_state."""
-    st.session_state.setdefault(key, options[0])
-    widget = getattr(st.sidebar, "segmented_control", st.sidebar.radio)
-    val = widget(label, options, key=key, format_func=(fmt or (lambda x: x)), help=help)
-    return val if val is not None else st.session_state.get(key) or options[0]
+def pick(label, options, key, help=None):
+    """Tap-to-select control matching the nav's radio style. Radio always returns a
+    valid option (unlike segmented pills, which can be deselected to None). Persists
+    across pages via session_state."""
+    if st.session_state.get(key) not in options:
+        st.session_state[key] = options[0]
+    return st.sidebar.radio(label, options, key=key, help=help)
 
 
 # ---- Sidebar: controls (Quarter always; growth/lens only where they apply) ----
@@ -1450,27 +1450,24 @@ cycle = st.sidebar.selectbox("Quarter", all_cycles)
 SCORING_PAGES = {"Profile", "Compare", "Rankings"}        # show the score-lens picker
 GROWTH_PAGES = {"Profile", "Compare", "Rankings", "M&A Targets", "Movers"}  # show growth basis
 GROWTH_OPTS = ["Year-over-year", "Quarter-over-quarter (annualized)"]
-GROWTH_FMT = {"Year-over-year": "YoY", "Quarter-over-quarter (annualized)": "QoQ"}
-LENS_FMT = {"Momentum (growth-led)": "Momentum",
-            "Performance (earnings & health)": "Performance"}
+LENS_OPTS = list(SCORE_LENSES)
 st.session_state.setdefault("growth_label", GROWTH_OPTS[0])
-st.session_state.setdefault("score_lens", list(SCORE_LENSES)[0])
+st.session_state.setdefault("score_lens", LENS_OPTS[0])
 
 if page in GROWTH_PAGES:
-    growth_label = pick("Growth basis", GROWTH_OPTS, "growth_label",
-                        fmt=lambda x: GROWTH_FMT.get(x, x))
-else:
-    growth_label = st.session_state.growth_label
+    pick("Growth basis", GROWTH_OPTS, "growth_label")
+growth_label = st.session_state.get("growth_label")
+if growth_label not in GROWTH_OPTS:
+    growth_label = GROWTH_OPTS[0]
 basis = "YoY" if growth_label.startswith("Year") else "QoQ"
 
 if page in SCORING_PAGES:
-    lens = pick("Score lens", list(SCORE_LENSES), "score_lens",
-                fmt=lambda x: LENS_FMT.get(x, x),
-                help="Momentum weights growth heaviest (who's expanding fastest). "
-                     "Performance weights earnings, capital, and asset quality (who's "
-                     "financially strongest).")
-else:
-    lens = st.session_state.score_lens
+    pick("Score lens", LENS_OPTS, "score_lens",
+         help="Momentum weights growth heaviest (who's expanding fastest). Performance "
+              "weights earnings, capital, and asset quality (who's financially strongest).")
+lens = st.session_state.get("score_lens")
+if lens not in SCORE_LENSES:
+    lens = LENS_OPTS[0]
 weights = SCORE_LENSES[lens]
 
 # ---- Sidebar: data-health status (footer; auto-opens only when flagged) ----
