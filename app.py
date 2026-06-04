@@ -512,7 +512,85 @@ def metrics_table(cycle):
     return d
 
 
-@st.cache_data(show_spinner=False)
+# Plausibility bands for derived ratios; values outside these signal suspect data
+# rather than a real credit union, and are counted toward a cycle's health status.
+_RATIO_BANDS = {"nim": (-1.0, 9.0), "roa": (-6.0, 6.0), "nw_ratio": (0.0, 40.0),
+                "delinquency": (0.0, 25.0), "efficiency": (0.0, 250.0)}
+
+
+@st.cache_data(show_spinner="Validating data…")
+def data_health(cycle_sig):
+    """Per-cycle data-quality report. Catches the failure modes that otherwise render
+    as fact: partial/failed ingests (missing income or assets), coverage drops, broken
+    year-to-date accumulation, and clusters of implausible ratios. Returns
+    {cycle: {cu_count, total_income, ..., status, issues}} with status ok/warn/error."""
+    cs = sorted(cycle_sig)
+    raw = {}
+    for c in cs:
+        m = metrics_table(c)
+        n = len(m)
+        inc = pd.to_numeric(m.int_income, errors="coerce") if n else pd.Series(dtype=float)
+        ast = pd.to_numeric(m.assets, errors="coerce") if n else pd.Series(dtype=float)
+        impl = pd.Series(False, index=m.index) if n else pd.Series(dtype=bool)
+        for k, (lo, hi) in _RATIO_BANDS.items():
+            if k in m:
+                v = pd.to_numeric(m[k], errors="coerce")
+                impl = impl | (v.notna() & ((v < lo) | (v > hi)))
+        raw[c] = {
+            "cu_count": n,
+            "total_income": float(inc[inc > 0].sum()) if n else 0.0,
+            "zero_income_pct": float((inc.isna() | (inc <= 0)).mean()) if n else 1.0,
+            "zero_assets_pct": float((ast.isna() | (ast <= 0)).mean()) if n else 1.0,
+            "implausible_pct": float(impl.mean()) if n else 0.0,
+        }
+
+    report = {}
+    for i, c in enumerate(cs):
+        r = dict(raw[c])
+        issues, status = [], "ok"
+
+        def bump(level):
+            nonlocal status
+            order = {"ok": 0, "warn": 1, "error": 2}
+            if order[level] > order[status]:
+                status = level
+
+        if r["zero_income_pct"] > 0.30:
+            issues.append(f"{r['zero_income_pct']*100:.0f}% of credit unions report no "
+                          "interest income — likely a partial or failed ingest.")
+            bump("error")
+        if r["zero_assets_pct"] > 0.10:
+            issues.append(f"{r['zero_assets_pct']*100:.0f}% report no total assets.")
+            bump("error")
+        if i > 0:
+            prev = raw[cs[i - 1]]["cu_count"]
+            if prev and r["cu_count"] < prev * 0.75:
+                issues.append(f"Credit-union count fell {(1-r['cu_count']/prev)*100:.0f}% "
+                              f"vs {cs[i-1]} ({prev:,} → {r['cu_count']:,}).")
+                bump("error")
+            elif prev and r["cu_count"] < prev * 0.90:
+                issues.append(f"Credit-union count down {(1-r['cu_count']/prev)*100:.0f}% "
+                              f"vs {cs[i-1]}.")
+                bump("warn")
+        yr = c.split("-")[0]
+        same_year_prior = [p for p in cs[:i] if p.split("-")[0] == yr]
+        if same_year_prior:
+            pj = same_year_prior[-1]
+            pinc = raw[pj]["total_income"]
+            if pinc > 0 and r["total_income"] < pinc * 0.8:
+                issues.append(f"Year-to-date interest income fell vs {pj} "
+                              f"(${pinc/1e9:.2f}B → ${r['total_income']/1e9:.2f}B); "
+                              "year-to-date figures should accumulate within a year.")
+                bump("error")
+        if r["implausible_pct"] > 0.05:
+            issues.append(f"{r['implausible_pct']*100:.1f}% of credit unions have "
+                          "out-of-range ratios.")
+            bump("warn")
+
+        report[c] = {**r, "status": status, "issues": issues}
+    return report
+
+
 @st.cache_data(show_spinner=False)
 def conversions_table(cycle_sig):
     if not (DATA_DIR / "CONVERSIONS").exists():
@@ -869,27 +947,51 @@ def _inv_base(v):
 
 def _ys_ratios(cur, pye, factor):
     """Yield & spread figures from current + prior-year-end account dicts.
-    pye may be None -> point-in-time balances are used as the 'average'."""
-    g = lambda d, c: (d.get(c) or 0.0) if d else 0.0
+    pye may be None -> point-in-time balances are used as the 'average'.
+
+    Robust to bad partitions: a missing/zero prior-year-end balance falls back to
+    the current balance (rather than averaging with 0, which would halve the
+    denominator and double the ratio); missing interest income yields blanks, not
+    zeros; and clearly-implausible outputs are suppressed as suspect."""
+    def num(d, c):
+        v = d.get(c) if d else None
+        return v if isinstance(v, (int, float)) and v == v else None      # not NaN
 
     def avg(c):
-        return (g(cur, c) + g(pye, c)) / 2 if pye else g(cur, c)
+        a, b = num(cur, c), (num(pye, c) if pye else None)
+        if not pye or b is None or b <= 0:        # no prior / prior missing -> point-in-time
+            return a or 0.0
+        return ((a or 0.0) + b) / 2.0
 
-    def rate(num, den):
-        return num * factor / den * 100 if den and den > 0 else None
+    def rate(n, den):
+        return n * factor / den * 100 if (n is not None and den and den > 0) else None
+
+    # Interest income must be present and positive, or the whole decomposition is moot.
+    ii = num(cur, "ACCT_115")
+    if ii is None or ii <= 0:
+        return {"yl": None, "yi": None, "yea": None, "cof": None,
+                "spread": None, "nim": None, "avg_ea": None, "avg_assets": None}
 
     avg_loans = avg("ACCT_025B") + avg("ACCT_003")          # incl. loans held for sale
-    ib_cur, ib_pye = _inv_base(cur), (_inv_base(pye) if pye else None)
-    avg_inv = (((ib_cur or 0) + (ib_pye or 0)) / 2) if pye else (ib_cur or 0)
+    ib_cur = _inv_base(cur)
+    ib_pye = _inv_base(pye) if pye else None
+    avg_inv = (((ib_cur or 0) + ib_pye) / 2.0
+               if (pye and ib_pye and ib_pye > 0) else (ib_cur or 0))
     avg_ea = avg_loans + avg_inv
     avg_fund = avg("ACCT_018") + avg("ACCT_860C")           # shares + borrowings
     avg_assets = avg("ACCT_010")
 
-    yl = rate(g(cur, "ACCT_110") - g(cur, "ACCT_119"), avg_loans)   # interest on loans
-    yi = rate(g(cur, "ACCT_120"), avg_inv)                          # income from investments
-    yea = rate(g(cur, "ACCT_115"), avg_ea)                          # total interest income
-    cof = rate(g(cur, "ACCT_350"), avg_fund)                        # total interest expense
-    nim = rate(g(cur, "ACCT_115") - g(cur, "ACCT_350"), avg_assets)
+    yl = rate((num(cur, "ACCT_110") or 0) - (num(cur, "ACCT_119") or 0), avg_loans)
+    yi = rate(num(cur, "ACCT_120"), avg_inv)
+    yea = rate(ii, avg_ea)
+    cof = rate(num(cur, "ACCT_350"), avg_fund)
+    nim = rate(ii - (num(cur, "ACCT_350") or 0), avg_assets)
+
+    # Plausibility backstop — egregious values signal bad data, not a real CU.
+    def sane(v, lo, hi):
+        return v if (v is not None and lo <= v <= hi) else None
+    yl, yi, yea = sane(yl, -2, 35), sane(yi, -2, 35), sane(yea, -2, 35)
+    cof, nim = sane(cof, -2, 15), sane(nim, -6, 15)
     spread = (yea - cof) if (yea is not None and cof is not None) else None
     return {"yl": yl, "yi": yi, "yea": yea, "cof": cof, "spread": spread, "nim": nim,
             "avg_ea": avg_ea, "avg_assets": avg_assets}
@@ -961,45 +1063,45 @@ def build_yield_spread_table(cu, mode, anchor, cycle_sig):
 
 
 def render_yield_spread(cu, cycle, cycle_sig, mode="Quarters"):
-    ys = yield_spread(cu, cycle, cycle_sig)
-    if not ys:
-        return
-    cur, prior = ys["cur"], ys["prior"]
     st.markdown("**Yield & spread**")
+    ys = yield_spread(cu, cycle, cycle_sig)
+    if ys:
+        cur, prior = ys["cur"], ys["prior"]
 
-    def card(col, label, key, good_high=True):
-        v = cur.get(key)
-        d = None
-        if prior and prior.get(key) is not None and v is not None:
-            d = f"{v - prior[key]:+.2f} pp"
-        col.metric(label, pct(v), delta=d,
-                   delta_color=(("normal" if good_high else "inverse") if d else "normal"))
+        def card(col, label, key, good_high=True):
+            v = cur.get(key)
+            d = None
+            if prior and prior.get(key) is not None and v is not None:
+                d = f"{v - prior[key]:+.2f} pp"
+            col.metric(label, pct(v), delta=d,
+                       delta_color=(("normal" if good_high else "inverse") if d else "normal"))
 
-    r1 = st.columns(3)
-    card(r1[0], "Yield on loans", "yl")
-    card(r1[1], "Yield on investments", "yi")
-    card(r1[2], "Yield on earning assets", "yea")
-    r2 = st.columns(3)
-    card(r2[0], "Cost of funds", "cof", good_high=False)
-    card(r2[1], "Net interest spread", "spread")
-    card(r2[2], "Net interest margin", "nim")
+        r1 = st.columns(3)
+        card(r1[0], "Yield on loans", "yl")
+        card(r1[1], "Yield on investments", "yi")
+        card(r1[2], "Yield on earning assets", "yea")
+        r2 = st.columns(3)
+        card(r2[0], "Cost of funds", "cof", good_high=False)
+        card(r2[1], "Net interest spread", "spread")
+        card(r2[2], "Net interest margin", "nim")
+    else:
+        st.caption("Yield & spread isn't available for the selected quarter — interest-income "
+                   "data is missing or didn't pass validation (see Data health in the sidebar).")
 
     tbl = build_yield_spread_table(cu, mode, cycle, cycle_sig)
     if not tbl.empty and len(tbl.columns) > 2:        # only worth a table with ≥2 periods
         st.dataframe(tbl, use_container_width=True, hide_index=True,
                      height=38 * len(tbl) + 38)
 
-    basis = ("average balances — (period + prior year-end) ÷ 2"
-             if ys["used_avg"] else "period-end balances (no prior year-end in range)")
     st.caption(
-        f"Income annualized over {basis}. Yield on investments uses total investments plus "
-        "cash on deposit, derived as assets net of loans, fixed assets, the NCUSIF deposit "
-        "and cash on hand. Cost of funds is total interest expense over average shares + "
-        "borrowings; net interest spread is the earning-asset yield minus cost of funds; net "
-        "interest margin is net interest income over average assets (NCUA FPR method). The "
-        "cards’ deltas are vs. one year prior. In the trend table each quarter is the "
-        "annualized year-to-date ratio — unlike the income statement, ratios are not "
-        "de-cumulated into standalone quarters.")
+        "Income annualized over average balances — (period + prior year-end) ÷ 2. Yield on "
+        "investments uses total investments plus cash on deposit, derived as assets net of "
+        "loans, fixed assets, the NCUSIF deposit and cash on hand. Cost of funds is total "
+        "interest expense over average shares + borrowings; net interest spread is the "
+        "earning-asset yield minus cost of funds; net interest margin is net interest income "
+        "over average assets (NCUA FPR method). The cards’ deltas are vs. one year prior. In "
+        "the trend table each quarter is the annualized year-to-date ratio — unlike the income "
+        "statement, ratios are not de-cumulated. Cells that fail validation show “—”.")
 
 
 @st.cache_data(show_spinner="Building industry history…")
@@ -1202,6 +1304,30 @@ if "FOICU" not in tables:
 
 all_cycles = cycles()
 sig = tuple(sorted(all_cycles))
+
+health = data_health(sig)
+_worst = ("error" if any(h["status"] == "error" for h in health.values())
+          else "warn" if any(h["status"] == "warn" for h in health.values()) else "ok")
+_icon = {"ok": "🟢", "warn": "🟡", "error": "🔴"}[_worst]
+_bad = sum(1 for h in health.values() if h["status"] != "ok")
+_hdr = ("Data health" if _worst == "ok"
+        else f"Data health — {_bad} cycle{'s' if _bad != 1 else ''} flagged")
+with st.sidebar.expander(f"{_icon} {_hdr}", expanded=(_worst == "error")):
+    if _worst == "ok":
+        st.caption(f"All {len(health)} cycles passed validation "
+                   "(coverage, year-to-date accumulation, and ratio sanity).")
+    else:
+        st.caption("Flagged cycles may show missing (—) or unreliable figures. "
+                   "Re-check the affected partitions and re-run the ingest.")
+        for c in sorted(health, reverse=True):
+            h = health[c]
+            if h["status"] == "ok":
+                continue
+            mark = {"warn": "🟡", "error": "🔴"}[h["status"]]
+            st.markdown(f"{mark} **{c}** · {h['cu_count']:,} CUs")
+            for msg in h["issues"]:
+                st.caption("• " + msg)
+
 page = st.sidebar.radio("View", ["Profile", "Compare", "Rankings", "Movers", "Mergers", "Industry"])
 st.sidebar.divider()
 cycle = st.sidebar.selectbox("Quarter", all_cycles)
