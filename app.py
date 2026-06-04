@@ -1872,11 +1872,10 @@ elif page == "Compare":
 # ============================================================ RANKINGS
 elif page == "Rankings":
     st.subheader("Screen & rank all credit unions")
-    f1, f2, f3 = st.columns([2, 2, 1])
+    f1, f2 = st.columns(2)
     all_states = sorted(s for s in mt.state.unique() if s)
     sel_states = f1.multiselect("State(s)", all_states, default=[])
     sel_bands = f2.multiselect("Asset size", [b[2] for b in BANDS], default=[])
-    top_n = f3.number_input("Show top", min_value=10, max_value=2000, value=100, step=10)
     rankable = ["score"] + [k for k, _, _, _ in METRICS]
     g1, g2 = st.columns([2, 1])
     rank_key = g1.selectbox("Rank by", rankable,
@@ -1902,7 +1901,7 @@ elif page == "Rankings":
     if excl:
         view = view[~view.cu.isin(tagged)]
     view = view.dropna(subset=[rank_key]).sort_values(
-        rank_key, ascending=order.startswith("Bottom")).head(int(top_n))
+        rank_key, ascending=order.startswith("Bottom"))
     if rank_key in ("score", "stars"):
         show_keys = ["score", "stars"] + [k for k, _ in weights]
     else:
@@ -1934,10 +1933,11 @@ elif page == "Rankings":
         disp["Merger"] = [merger_tag(c, acq, inf) for c in view.cu.values]
     disp.insert(0, "Rank", range(1, len(disp) + 1))
     colcfg["Rank"] = st.column_config.NumberColumn("Rank", format="%d", width="small")
-    st.caption(f"{len(view):,} credit unions shown (of {len(mt):,} total). "
-               f"Rank is by **{META[rank_key][0]}** — change “Rank by” above to re-rank. "
-               "Click any column header to re-sort the grid.")
-    st.dataframe(disp, use_container_width=True, hide_index=True, height=560,
+    st.caption(f"All {len(view):,} credit unions shown (of {len(mt):,} total), {cycle} — "
+               f"initially ranked by **{META[rank_key][0]}**. Click any column header to "
+               "re-rank the whole table by that measure (the Rank column reflects the "
+               "“Rank by” choice).")
+    st.dataframe(disp, use_container_width=True, hide_index=True, height=600,
                  column_config=colcfg)
 
 # ============================================================ MOVERS
@@ -2174,7 +2174,7 @@ elif page == "M&A Targets":
         earn = 0.5 * (1 - asc_pct(sub.roa)) + 0.5 * asc_pct(sub.efficiency)   # weak earnings
         sub = sub.assign(target=(100 * (0.25 * size + 0.25 * shrink
                                         + 0.25 * cap + 0.25 * earn)).round(0))
-        v = sub.sort_values("target", ascending=False).head(100)
+        v = sub.sort_values("target", ascending=False)
         disp = pd.DataFrame({"Credit Union": v.cu_name.values, "State": v.state.values,
                              "Band": v.band.values, "Assets ($M)": (v.assets / 1e6).values,
                              "Asset Growth": v.assets_growth.values,
@@ -2190,12 +2190,13 @@ elif page == "M&A Targets":
             colcfg[c2] = st.column_config.NumberColumn(c2, format="%.2f%%")
         disp.insert(0, "Rank", range(1, len(disp) + 1))
         colcfg["Rank"] = st.column_config.NumberColumn("Rank", format="%d", width="small")
-        st.caption(f"Top {len(v):,} of {len(sub):,} candidates in {label}, {cycle}. Higher "
-                   "score = more target-like. Equal-weighted (25% each): size (smaller), "
-                   "growth (shrinking), capital (thinner net worth), and earnings (low ROA / "
-                   "high efficiency) — each scored as a percentile within this universe. A "
-                   "screen, not a recommendation.")
-        st.dataframe(disp, use_container_width=True, hide_index=True, height=560,
+        st.caption(f"All {len(v):,} candidates in {label}, {cycle} — sorted by target score "
+                   "(click any column header to re-rank by that measure). Higher score = "
+                   "more target-like. Equal-weighted (25% each): size (smaller), growth "
+                   "(shrinking), capital (thinner net worth), and earnings (low ROA / high "
+                   "efficiency) — each scored as a percentile within this universe. A screen, "
+                   "not a recommendation.")
+        st.dataframe(disp, use_container_width=True, hide_index=True, height=600,
                      column_config=colcfg)
 
 # ============================================================ DATA QUALITY
