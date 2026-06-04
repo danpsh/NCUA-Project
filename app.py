@@ -124,6 +124,21 @@ def money(x):
     return f"${x:,.0f}" if isinstance(x, numbers.Real) and not pd.isna(x) else "—"
 
 
+def money_compact(x):
+    """Abbreviated dollars for tight/mobile KPI cards: $847K / $387.0M / $1.24B.
+    Tables keep full precision via money()."""
+    if not (isinstance(x, numbers.Real) and not pd.isna(x)):
+        return "—"
+    a, sign = abs(x), ("-" if x < 0 else "")
+    if a >= 1e9:
+        return f"{sign}${a / 1e9:.2f}B"
+    if a >= 1e6:
+        return f"{sign}${a / 1e6:.1f}M"
+    if a >= 1e3:
+        return f"{sign}${a / 1e3:.0f}K"
+    return f"{sign}${a:.0f}"
+
+
 def intfmt(x):
     return f"{x:,.0f}" if isinstance(x, numbers.Real) and not pd.isna(x) else "—"
 
@@ -205,10 +220,12 @@ def _delta(key, cur, prev):
 
 
 def metric_card(col, key, row, prev_row):
-    """Render an st.metric with a prior-quarter delta (direction-aware coloring)."""
+    """Render an st.metric with a prior-quarter delta (direction-aware coloring).
+    Money values use compact notation so large figures fit narrow/mobile cards."""
     prev = prev_row[key] if (prev_row is not None and key in prev_row) else None
     text, color = _delta(key, row[key], prev)
-    col.metric(META[key][0], fmt(key, row[key]), delta=text, delta_color=color)
+    val = money_compact(row[key]) if META[key][1] == "money" else fmt(key, row[key])
+    col.metric(META[key][0], val, delta=text, delta_color=color)
 
 
 def color_scale(series, direction):
