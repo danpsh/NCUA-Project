@@ -1470,19 +1470,16 @@ if lens not in SCORE_LENSES:
     lens = LENS_OPTS[0]
 weights = SCORE_LENSES[lens]
 
-# ---- Sidebar: data-health status (footer; auto-opens only when flagged) ----
+# ---- Sidebar: data-health status — surfaced only when a cycle is flagged ----
 _worst = ("error" if any(h["status"] == "error" for h in health.values())
           else "warn" if any(h["status"] == "warn" for h in health.values()) else "ok")
-_icon = {"ok": "🟢", "warn": "🟡", "error": "🔴"}[_worst]
-_bad = sum(1 for h in health.values() if h["status"] != "ok")
-st.sidebar.divider()
-_hdr = ("Data health — all clear" if _worst == "ok"
-        else f"Data health — {_bad} cycle{'s' if _bad != 1 else ''} flagged")
-with st.sidebar.expander(f"{_icon} {_hdr}", expanded=(_worst != "ok")):
-    if _worst == "ok":
-        st.caption(f"All {len(health)} cycles passed validation "
-                   "(coverage, year-to-date accumulation, ratio sanity).")
-    else:
+if _worst != "ok":
+    _bad = sum(1 for h in health.values() if h["status"] != "ok")
+    _icon = {"warn": "🟡", "error": "🔴"}[_worst]
+    st.sidebar.divider()
+    with st.sidebar.expander(
+            f"{_icon} Data health — {_bad} cycle{'s' if _bad != 1 else ''} flagged",
+            expanded=True):
         st.caption("Flagged cycles may show missing (—) or unreliable figures. "
                    "Re-check the affected partitions and re-run the ingest.")
         for c in sorted(health, reverse=True):
