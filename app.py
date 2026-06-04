@@ -1921,7 +1921,7 @@ elif page == "Chart":
                     ["Compare credit unions on one measure",
                      "One credit union across measures"], horizontal=True)
 
-    tf1, tf2, tf3, tf4 = st.columns([1, 2, 1, 1])
+    tf1, tf2 = st.columns([1, 3])
     span = tf1.radio("Period", ["Quarters", "Years"], horizontal=True, key="chart_span")
     cyc_opts = [c for c in sorted(all_cycles) if span == "Quarters" or c.endswith("-12")]
     if len(cyc_opts) >= 2:
@@ -1930,9 +1930,18 @@ elif page == "Chart":
         in_range = [c for c in cyc_opts if lo <= c <= hi]
     else:
         in_range = cyc_opts
-    markers = tf3.checkbox("Markers", value=True)
-    labels = tf4.checkbox("Data labels", value=False)
-    line_mode = ("lines+markers" if markers else "lines") + ("+text" if labels else "")
+
+    o1, o2, o3, o4 = st.columns(4)
+    markers = o1.checkbox("Markers", value=True)
+    label_mode = o2.selectbox("Data labels", ["None", "All points", "First & last", "Last only"])
+    label_pos = o3.selectbox("Label position", ["Top", "Bottom", "Right", "Left"])
+    title_align = o4.selectbox("Title align", ["Left", "Center", "Right"])
+    labels_on = label_mode != "None"
+    line_mode = ("lines+markers" if markers else "lines") + ("+text" if labels_on else "")
+    POS = {"Top": "top center", "Bottom": "bottom center",
+           "Right": "middle right", "Left": "middle left"}[label_pos]
+    TITLE_X = {"Left": (0.0, "left"), "Center": (0.5, "center"),
+               "Right": (1.0, "right")}[title_align]
     idx = [_period_label(c, span) for c in in_range]
     metric_keys = [k for k, _, _ in CHART_METRICS]
     default_cu = next((c for c in ALL_LABELS if str(c) == "61790"), next(iter(ALL_LABELS), None))
@@ -1954,7 +1963,15 @@ elif page == "Chart":
         return f"{v:.2f}%"
 
     def txt(series, kind):
-        return [lab(kind, v) for v in series.values] if labels else None
+        if not labels_on:
+            return None
+        vals = series.values
+        full = [lab(kind, v) for v in vals]
+        valid = [i for i, v in enumerate(vals) if pd.notna(v)]
+        if not valid or label_mode == "All points":
+            return full
+        keep = {valid[0], valid[-1]} if label_mode == "First & last" else {valid[-1]}
+        return [full[i] if i in keep else "" for i in range(len(full))]
 
     def minmax(series):
         v = pd.to_numeric(series, errors="coerce").dropna()
@@ -1969,7 +1986,8 @@ elif page == "Chart":
         return [a, b] if b > a else None
 
     def styled(fig, title):
-        fig.update_layout(title=dict(text=title, x=0, xanchor="left", font=dict(size=16)),
+        fig.update_layout(title=dict(text=title, x=TITLE_X[0], xanchor=TITLE_X[1],
+                                     font=dict(size=16)),
                           height=500, hovermode="x unified",
                           margin=dict(l=10, r=10, t=48, b=44),
                           legend=dict(orientation="h", yanchor="top", y=-0.14, x=0))
@@ -2000,8 +2018,7 @@ elif page == "Chart":
                 allvals += list(y.dropna().values)
                 fig.add_trace(go.Scatter(x=idx, y=y.values, mode=line_mode,
                                          name=ALL_LABELS[c].split(" (#")[0], connectgaps=True,
-                                         text=txt(y, chart_kind(metric)),
-                                         textposition="top center"))
+                                         text=txt(y, chart_kind(metric)), textposition=POS))
             if not allvals:
                 st.info("No data for this measure over the selected range.")
             else:
@@ -2052,12 +2069,13 @@ elif page == "Chart":
             if rngR:
                 yR["range"] = rngR
             fig = go.Figure()
+            posB = {"top center": "bottom center", "bottom center": "top center"}.get(POS, POS)
             fig.add_trace(go.Scatter(x=idx, y=yA.values, mode=line_mode, name=CHART_LABEL[mA],
                                      yaxis="y", connectgaps=True,
-                                     text=txt(yA, chart_kind(mA)), textposition="top center"))
+                                     text=txt(yA, chart_kind(mA)), textposition=POS))
             fig.add_trace(go.Scatter(x=idx, y=yB.values, mode=line_mode, name=CHART_LABEL[mB],
                                      yaxis="y2", connectgaps=True,
-                                     text=txt(yB, chart_kind(mB)), textposition="bottom center"))
+                                     text=txt(yB, chart_kind(mB)), textposition=posB))
             fig.update_layout(yaxis=yL, yaxis2=yR)
             styled(fig, title)
             st.plotly_chart(fig, use_container_width=True)
@@ -2071,7 +2089,8 @@ elif page == "Chart":
             else:
                 title = st.text_input("Chart title", value=f"{cu_name} — selected measures",
                                       key=f"ct_sm_{cu_pick}_" + "_".join(sel))
-                st.markdown(f"#### {title}")
+                st.markdown(f"<h4 style='text-align:{title_align.lower()};margin:0'>{title}</h4>",
+                            unsafe_allow_html=True)
                 st.caption(f"{cu_name} — each measure on its own axis, {idx[0]}–{idx[-1]} "
                            f"({span.lower()}). Tick “Overlay two measures on dual axes” above "
                            "to combine two on a single chart with independent scales.")
@@ -2080,8 +2099,7 @@ elif page == "Chart":
                     y = pd.to_numeric(s[k], errors="coerce") if k in s else pd.Series(dtype=float)
                     fig = go.Figure(go.Scatter(x=idx, y=y.values, mode=line_mode,
                                                name=CHART_LABEL[k], connectgaps=True,
-                                               text=txt(y, chart_kind(k)),
-                                               textposition="top center"))
+                                               text=txt(y, chart_kind(k)), textposition=POS))
                     fig.update_yaxes(showgrid=False, **axis_kw(chart_kind(k)))
                     fig.update_xaxes(showgrid=False)
                     fig.update_traces(textfont_size=9)
