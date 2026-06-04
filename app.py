@@ -1517,17 +1517,17 @@ def universe_picker(df, key):
     return df, "all credit unions"
 
 
-def screen_filters(df, key, default_top=100):
-    """State(s) + Asset size multiselects and a Show-top control, matching the
-    Rankings page. Both multiselects are optional (empty = all). Returns
-    (filtered_df, top_n, human_label)."""
-    f1, f2, f3 = st.columns([2, 2, 1])
+def screen_filters(df, key, default_top=100, show_top=True):
+    """State(s) + Asset size multiselects (both optional, empty = all) and an optional
+    Show-top control. Returns (filtered_df, top_n_or_None, human_label)."""
+    cols = st.columns([2, 2, 1] if show_top else [1, 1])
     all_states = sorted(s for s in df.state.dropna().unique() if s)
-    sel_states = f1.multiselect("State(s)", all_states, default=[], key=f"{key}_states")
-    sel_bands = f2.multiselect("Asset size", [b[2] for b in BANDS], default=[],
-                               key=f"{key}_bands")
-    top_n = f3.number_input("Show top", min_value=10, max_value=2000,
-                            value=default_top, step=10, key=f"{key}_top")
+    sel_states = cols[0].multiselect("State(s)", all_states, default=[], key=f"{key}_states")
+    sel_bands = cols[1].multiselect("Asset size", [b[2] for b in BANDS], default=[],
+                                    key=f"{key}_bands")
+    top_n = (cols[2].number_input("Show top", min_value=10, max_value=2000,
+                                  value=default_top, step=10, key=f"{key}_top")
+             if show_top else None)
     out = df
     if sel_states:
         out = out[out.state.isin(sel_states)]
@@ -1538,7 +1538,8 @@ def screen_filters(df, key, default_top=100):
         parts.append(", ".join(sel_states))
     if sel_bands:
         parts.append(", ".join(sel_bands))
-    return out, int(top_n), (" · ".join(parts) if parts else "all credit unions")
+    return out, (int(top_n) if top_n is not None else None), \
+        (" · ".join(parts) if parts else "all credit unions")
 
 
 # ============================================================ PROFILE
@@ -2119,7 +2120,7 @@ elif page == "Yields":
     if rt.empty:
         st.info("No rate data available for this quarter.")
     else:
-        sub, top_n, label = screen_filters(rt, "rates")
+        sub, _, label = screen_filters(rt, "rates", show_top=False)
         labels = {k: lbl for k, lbl, _ in RATE_COLS}
         dirs = {k: d for k, _, d in RATE_COLS}
         g1, g2 = st.columns([2, 1])
@@ -2128,7 +2129,7 @@ elif page == "Yields":
         order = g2.radio("Order", ["Top (high→low)", "Bottom (low→high)"],
                          index=0 if dirs[rank_key] == "high" else 1, horizontal=True)
         v = sub.dropna(subset=[rank_key]).sort_values(
-            rank_key, ascending=order.startswith("Bottom")).head(top_n)
+            rank_key, ascending=order.startswith("Bottom"))
         if v.empty:
             st.info("No credit unions with valid figures for this filter.")
         else:
@@ -2140,11 +2141,13 @@ elif page == "Yields":
                 colcfg[lbl] = st.column_config.NumberColumn(lbl, format="%.2f%%")
             disp.insert(0, "Rank", range(1, len(disp) + 1))
             colcfg["Rank"] = st.column_config.NumberColumn("Rank", format="%d", width="small")
-            st.caption(f"{len(v):,} of {len(sub):,} credit unions ({label}), {cycle}, ranked "
-                       f"by **{labels[rank_key]}**. Yields on the NCUA FPR average-balance "
-                       "basis ((current + prior year-end) ÷ 2); cost of funds is total interest "
-                       "expense over average shares + borrowings. Click any header to re-sort.")
-            st.dataframe(disp, use_container_width=True, hide_index=True, height=560,
+            st.caption(f"All {len(v):,} credit unions ({label}), {cycle} — initially ranked by "
+                       f"**{labels[rank_key]}**. Click any column header to re-rank the entire "
+                       "table by that measure (the Rank column reflects the “Rank by” choice). "
+                       "Yields on the NCUA FPR average-balance basis ((current + prior "
+                       "year-end) ÷ 2); cost of funds is total interest expense over average "
+                       "shares + borrowings.")
+            st.dataframe(disp, use_container_width=True, hide_index=True, height=600,
                          column_config=colcfg)
 
 # ============================================================ TARGETS (M&A)
