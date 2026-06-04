@@ -1123,6 +1123,46 @@ def ys_point(cu, cycle, cycle_sig):
     return _ys_ratios(cur, pye, 12 / int(cycle[-2:])), (pye is not None)
 
 
+# Measures offered in the Chart builder, grouped for the picker.
+CHART_METRICS = [
+    ("roa", "ROA", "Profitability & efficiency"),
+    ("roe", "ROE", "Profitability & efficiency"),
+    ("nim", "Net Interest Margin", "Profitability & efficiency"),
+    ("efficiency", "Efficiency Ratio", "Profitability & efficiency"),
+    ("yl", "Yield on Loans", "Yields & spread"),
+    ("yi", "Yield on Investments", "Yields & spread"),
+    ("yea", "Yield on Earning Assets", "Yields & spread"),
+    ("cof", "Cost of Funds", "Yields & spread"),
+    ("spread", "Net Interest Spread", "Yields & spread"),
+    ("nw_ratio", "Net Worth Ratio", "Capital & asset quality"),
+    ("delinquency", "Delinquency Ratio", "Capital & asset quality"),
+    ("nco", "Net Charge-Off Ratio", "Capital & asset quality"),
+    ("lts", "Loan-to-Share", "Capital & asset quality"),
+    ("assets", "Total Assets", "Size ($)"),
+    ("loans", "Loans & Leases", "Size ($)"),
+    ("shares", "Shares & Deposits", "Size ($)"),
+    ("net_worth", "Net Worth", "Size ($)"),
+    ("net_income", "Net Income (YTD)", "Size ($)"),
+    ("members", "Members", "Size ($)"),
+]
+CHART_LABEL = {k: lbl for k, lbl, _ in CHART_METRICS}
+_YS_KEYS = ("yl", "yi", "yea", "cof", "spread")
+
+
+@st.cache_data(show_spinner="Building the series…")
+def chart_series(cu, cycle_sig):
+    """Per-cycle time series for one CU: the standard scorecard metrics plus the
+    yield & spread decomposition, indexed by cycle (chronological)."""
+    base = cu_timeseries(cu, cycle_sig)
+    if base.empty:
+        return base
+    base = base.sort_index()
+    ys = {c: (ys_point(base.loc[c, "cu"], c, cycle_sig) or ({},))[0] for c in base.index}
+    for k in _YS_KEYS:
+        base[k] = [ys.get(c, {}).get(k) for c in base.index]
+    return base
+
+
 @st.cache_data(show_spinner=False)
 def yield_spread(cu, cycle, cycle_sig):
     """Yield & spread for one CU at `cycle`, plus the same period one year earlier
@@ -1424,11 +1464,11 @@ health = data_health(sig)
 st.sidebar.markdown("#### 📊 Call Report Explorer")
 
 # ---- Sidebar: navigation (grouped by workflow, icon-labeled) ----
-NAV = ["Profile", "Compare", "Rankings", "Yields", "M&A Targets",
+NAV = ["Profile", "Compare", "Chart", "Rankings", "Yields", "M&A Targets",
        "Movers", "Merger History", "Industry", "Data Health"]
-NAV_ICON = {"Profile": "👤", "Compare": "⚖️", "Rankings": "🏆", "Yields": "📈",
-            "M&A Targets": "🎯", "Movers": "🚀", "Merger History": "🔀", "Industry": "🏛️",
-            "Data Health": "🩺"}
+NAV_ICON = {"Profile": "👤", "Compare": "⚖️", "Chart": "📉", "Rankings": "🏆",
+            "Yields": "📈", "M&A Targets": "🎯", "Movers": "🚀",
+            "Merger History": "🔀", "Industry": "🏛️", "Data Health": "🩺"}
 page = st.sidebar.radio("View", NAV, format_func=lambda p: f"{NAV_ICON[p]}  {p}",
                         label_visibility="collapsed")
 
@@ -1865,6 +1905,74 @@ elif page == "Compare":
                     with grid[i % 2]:
                         st.caption(META[key][0])
                         st.line_chart(series)
+
+# ============================================================ CHART
+elif page == "Chart":
+    st.subheader("Chart builder")
+    mode = st.radio("Chart type",
+                    ["Compare credit unions on one measure",
+                     "One credit union across measures"], horizontal=True)
+
+    tf1, tf2 = st.columns([1, 3])
+    span = tf1.radio("Period", ["Quarters", "Years"], horizontal=True, key="chart_span")
+    cyc_opts = [c for c in sorted(all_cycles) if span == "Quarters" or c.endswith("-12")]
+    if len(cyc_opts) >= 2:
+        lo, hi = tf2.select_slider("Range", options=cyc_opts,
+                                   value=(cyc_opts[0], cyc_opts[-1]),
+                                   format_func=lambda c: _period_label(c, span))
+        in_range = [c for c in cyc_opts if lo <= c <= hi]
+    else:
+        in_range = cyc_opts
+    idx = [_period_label(c, span) for c in in_range]
+    metric_keys = [k for k, _, _ in CHART_METRICS]
+    default_cu = next((c for c in ALL_LABELS if str(c) == "61790"), next(iter(ALL_LABELS), None))
+
+    if len(in_range) < 2:
+        st.info("Pick a range spanning at least two periods to plot a trend.")
+    elif mode.startswith("Compare"):
+        metric = st.selectbox("Measure", metric_keys, format_func=lambda k: CHART_LABEL[k],
+                              index=metric_keys.index("nim"))
+        picks = st.multiselect("Credit unions (up to 6)", list(ALL_LABELS),
+                               default=[default_cu] if default_cu is not None else [],
+                               max_selections=6, format_func=lambda c: ALL_LABELS[c])
+        if not picks:
+            st.info("Choose at least one credit union.")
+        else:
+            data = {}
+            for c in picks:
+                s = chart_series(c, sig)
+                if s.empty or metric not in s:
+                    continue
+                name = ALL_LABELS[c].split(" (#")[0]
+                data[name] = pd.to_numeric(s[metric], errors="coerce").reindex(in_range).values
+            chart = pd.DataFrame(data, index=idx)
+            if chart.dropna(how="all").empty:
+                st.info("No data for this measure over the selected range.")
+            else:
+                st.line_chart(chart)
+                st.caption(f"{CHART_LABEL[metric]} by quarter ({span.lower()}), "
+                           f"{idx[0]}–{idx[-1]}. Yields on the NCUA FPR average-balance basis; "
+                           "money measures are in dollars.")
+    else:
+        cu_keys = list(ALL_LABELS)
+        cu_pick = st.selectbox("Credit union", cu_keys,
+                               index=cu_keys.index(default_cu) if default_cu in cu_keys else 0,
+                               format_func=lambda c: ALL_LABELS[c])
+        sel = st.multiselect("Measures", metric_keys, format_func=lambda k: CHART_LABEL[k],
+                             default=["nim", "roa", "efficiency", "nw_ratio"])
+        s = chart_series(cu_pick, sig)
+        if s.empty or not sel:
+            st.info("Choose at least one measure (and a credit union with history).")
+        else:
+            s = s.reindex(in_range)
+            st.caption(f"{ALL_LABELS[cu_pick].split(' (#')[0]} — each measure on its own axis, "
+                       f"{idx[0]}–{idx[-1]} ({span.lower()}).")
+            grid = st.columns(2)
+            for i, k in enumerate(sel):
+                with grid[i % 2]:
+                    st.caption(CHART_LABEL[k])
+                    col = pd.to_numeric(s[k], errors="coerce") if k in s else pd.Series(dtype=float)
+                    st.line_chart(pd.DataFrame({CHART_LABEL[k]: col.values}, index=idx))
 
 # ============================================================ RANKINGS
 elif page == "Rankings":
