@@ -596,6 +596,98 @@ def data_health(cycle_sig):
     return report
 
 
+# Vectorized yield & spread for every CU in a cycle (FPR average-balance basis),
+# mirroring _ys_ratios but computed across the whole industry for the Rates board.
+_RATE_BAL = ["ACCT_010", "ACCT_025B", "ACCT_018", "ACCT_860C", "ACCT_730A",
+             "ACCT_007", "ACCT_008", "ACCT_794", "ACCT_009A", "ACCT_009B", "ACCT_009C"]
+
+
+@st.cache_data(show_spinner="Computing yields & spreads…")
+def rate_table(cycle, cycle_sig):
+    def read(tbl, cyc):
+        try:
+            df = con.execute(
+                f"SELECT * FROM read_parquet('{glob_for(tbl)}', hive_partitioning=true, "
+                "union_by_name=true) WHERE cycle = ?", [cyc]).df()
+        except Exception:
+            return pd.DataFrame()
+        if df.empty or "CU_NUMBER" not in df.columns:
+            return pd.DataFrame()
+        df.columns = [c.upper() for c in df.columns]
+        df["CU_NUMBER"] = df["CU_NUMBER"].astype(str)
+        return df.drop_duplicates("CU_NUMBER").set_index("CU_NUMBER")
+
+    f, a = read("FS220", cycle), read("FS220A", cycle)
+    if f.empty or a.empty:
+        return pd.DataFrame()
+    pye = f"{int(cycle[:4]) - 1}-12"
+    fp = read("FS220", pye) if pye in cycle_sig else pd.DataFrame()
+    idx = f.index
+
+    def col(df, code):
+        if df is None or df.empty or code not in df.columns:
+            return pd.Series(np.nan, index=idx)
+        return pd.to_numeric(df[code], errors="coerce").reindex(idx)
+
+    bal = lambda code: col(f, code).fillna(col(a, code))      # balances: FS220, then FS220A
+    balp = lambda code: col(fp, code)                          # prior year-end: FS220
+
+    def avg(cur_s, pye_s):                                     # FPR (cur + PYE) / 2; robust
+        if fp.empty or pye_s is None:
+            return cur_s
+        use = pye_s.notna() & (pye_s > 0)
+        return cur_s.where(~use, (cur_s.fillna(0) + pye_s) / 2)
+
+    def inv_base(getter):
+        return (getter("ACCT_010") - getter("ACCT_025B") - getter("ACCT_730A")
+                - getter("ACCT_007") - getter("ACCT_008") - getter("ACCT_794")
+                - getter("ACCT_009A") - getter("ACCT_009B") - getter("ACCT_009C"))
+
+    ann = 12 / int(cycle[-2:])
+    avg_loans = avg(bal("ACCT_025B"), balp("ACCT_025B"))
+    avg_inv = avg(inv_base(bal), inv_base(balp) if not fp.empty else None)
+    avg_ea = avg_loans + avg_inv
+    avg_fund = avg(bal("ACCT_018"), balp("ACCT_018")) + avg(bal("ACCT_860C"), balp("ACCT_860C"))
+    avg_assets = avg(bal("ACCT_010"), balp("ACCT_010"))
+
+    i110, i119, i120 = col(a, "ACCT_110"), col(a, "ACCT_119"), col(a, "ACCT_120")
+    i115, i350 = col(a, "ACCT_115"), col(a, "ACCT_350")
+
+    def rate(num, den):
+        return (num * ann / den * 100).where(den.notna() & (den > 0))
+
+    yl = rate(i110.fillna(0) - i119.fillna(0), avg_loans)
+    yi = rate(i120, avg_inv)
+    yea = rate(i115, avg_ea)
+    cof = rate(i350, avg_fund)
+    nim = rate(i115 - i350.fillna(0), avg_assets)
+
+    valid = i115.notna() & (i115 > 0)                          # income guard
+    for s in (yl, yi, yea, cof, nim):
+        s[~valid] = np.nan
+
+    def clamp(s, lo, hi):                                      # plausibility backstop
+        return s.where((s >= lo) & (s <= hi))
+    yl, yi, yea = clamp(yl, -2, 35), clamp(yi, -2, 35), clamp(yea, -2, 35)
+    cof, nim = clamp(cof, -2, 15), clamp(nim, -6, 15)
+    spread = yea - cof
+
+    rdf = pd.DataFrame({"cu": idx, "yl": yl.values, "yi": yi.values, "yea": yea.values,
+                        "cof": cof.values, "spread": spread.values, "nim": nim.values})
+    base = metrics_table(cycle)[["cu", "cu_name", "state", "band", "assets"]].copy()
+    base["cu"] = base.cu.astype(str)
+    return base.merge(rdf, on="cu", how="left")
+
+
+# Labels / sort direction for the Rates leaderboard (higher better, except cost of funds).
+RATE_COLS = [("nim", "Net Interest Margin", "high"),
+             ("spread", "Net Interest Spread", "high"),
+             ("yea", "Yield on Earning Assets", "high"),
+             ("yl", "Yield on Loans", "high"),
+             ("yi", "Yield on Investments", "high"),
+             ("cof", "Cost of Funds", "low")]
+
+
 @st.cache_data(show_spinner=False)
 def conversions_table(cycle_sig):
     if not (DATA_DIR / "CONVERSIONS").exists():
@@ -1333,7 +1425,8 @@ with st.sidebar.expander(f"{_icon} {_hdr}", expanded=(_worst == "error")):
             for msg in h["issues"]:
                 st.caption("• " + msg)
 
-page = st.sidebar.radio("View", ["Profile", "Compare", "Rankings", "Movers", "Mergers", "Industry"])
+page = st.sidebar.radio("View", ["Profile", "Compare", "Rankings", "Rates", "Movers",
+                                 "Mergers", "Targets", "Industry", "Data quality"])
 st.sidebar.divider()
 cycle = st.sidebar.selectbox("Quarter", all_cycles)
 growth_label = st.sidebar.selectbox(
@@ -1348,6 +1441,24 @@ mt = enriched_table(cycle, basis, lens, sig)
 
 # label helper shared across pages
 ALL_LABELS = {r.cu: f"{r.cu_name} (#{r.cu}, {r.state})" for r in mt.itertuples()}
+
+
+def universe_picker(df, key):
+    """Industry / band / state filter shared by the Rates and Targets pages.
+    Returns (filtered_df, human_label)."""
+    mode = st.radio("Universe", ["Whole industry", "By asset band", "By state"],
+                    horizontal=True, key=f"{key}_mode")
+    if mode == "By asset band":
+        b = st.selectbox("Asset band", [x[2] for x in BANDS], index=4, key=f"{key}_band")
+        return df[df.band == b], f"the {b} band"
+    if mode == "By state":
+        states = sorted(s for s in df.state.dropna().unique() if s)
+        if not states:
+            return df, "all credit unions"
+        s = st.selectbox("State", states, key=f"{key}_state")
+        return df[df.state == s], s
+    return df, "all credit unions"
+
 
 # ============================================================ PROFILE
 if page == "Profile":
@@ -1919,3 +2030,123 @@ elif page == "Industry":
         "Median ROA": [pct(x) for x in g.median_roa.values],
         "Median Efficiency": [pct(x) for x in g.median_eff.values]})
     st.dataframe(disp, use_container_width=True, hide_index=True, height=420)
+
+# ============================================================ RATES
+elif page == "Rates":
+    st.subheader("Rate & spread leaderboard")
+    rt = rate_table(cycle, sig)
+    if rt.empty:
+        st.info("No rate data available for this quarter.")
+    else:
+        sub, label = universe_picker(rt, "rates")
+        labels = {k: lbl for k, lbl, _ in RATE_COLS}
+        dirs = {k: d for k, _, d in RATE_COLS}
+        c1, c2, c3 = st.columns([2, 1, 1])
+        rank_key = c1.selectbox("Rank by", [k for k, _, _ in RATE_COLS],
+                                format_func=lambda k: labels[k])
+        order = c2.radio("Order", ["Top", "Bottom"],
+                         index=0 if dirs[rank_key] == "high" else 1, horizontal=True)
+        top_n = c3.number_input("Show", 10, 2000, 100, 10)
+        v = sub.dropna(subset=[rank_key]).sort_values(
+            rank_key, ascending=(order == "Bottom")).head(int(top_n))
+        if v.empty:
+            st.info("No credit unions with valid figures in this universe.")
+        else:
+            disp = pd.DataFrame({"Credit Union": v.cu_name.values, "State": v.state.values,
+                                 "Assets ($M)": (v.assets / 1e6).values})
+            colcfg = {"Assets ($M)": st.column_config.NumberColumn("Assets ($M)", format="$%.0f")}
+            for k, lbl, _ in RATE_COLS:
+                disp[lbl] = v[k].values
+                colcfg[lbl] = st.column_config.NumberColumn(lbl, format="%.2f%%")
+            disp.insert(0, "Rank", range(1, len(disp) + 1))
+            colcfg["Rank"] = st.column_config.NumberColumn("Rank", format="%d", width="small")
+            st.caption(f"{len(v):,} of {len(sub):,} credit unions in {label}, {cycle}, ranked "
+                       f"by **{labels[rank_key]}**. Yields on the NCUA FPR average-balance "
+                       "basis ((current + prior year-end) ÷ 2); cost of funds is total interest "
+                       "expense over average shares + borrowings. Click any header to re-sort.")
+            st.dataframe(disp, use_container_width=True, hide_index=True, height=560,
+                         column_config=colcfg)
+
+# ============================================================ TARGETS (M&A)
+elif page == "Targets":
+    st.subheader("M&A target screener")
+    st.caption("Ranks credit unions by acquisition-target attractiveness from four distress "
+               "signals — small size, shrinking, thin capital, and weak earnings. Confirmed "
+               "and likely acquirers are excluded (they're consolidators, not targets).")
+    acq = merger_acquirers(cycle, sig)
+    inf = inferred_acquirers(cycle, sig)
+    tagged = set(acq) | set(inf)
+    pool = mt[~mt.cu.isin(tagged)].copy()
+    sub, label = universe_picker(pool, "tgt")
+    sub = sub.dropna(subset=["assets", "nw_ratio", "roa", "efficiency"])
+    if len(sub) < 5:
+        st.info("Not enough credit unions in this universe to score.")
+    else:
+        def asc_pct(s):
+            return pd.to_numeric(s, errors="coerce").rank(pct=True)
+        grw = sub[["assets_growth", "members_growth"]].mean(axis=1)
+        size = 1 - asc_pct(sub.assets)                       # smaller -> more target-like
+        shrink = 1 - asc_pct(grw)                            # lower growth -> more
+        cap = 1 - asc_pct(sub.nw_ratio)                      # thinner capital -> more
+        earn = 0.5 * (1 - asc_pct(sub.roa)) + 0.5 * asc_pct(sub.efficiency)   # weak earnings
+        sub = sub.assign(target=(100 * (0.25 * size + 0.25 * shrink
+                                        + 0.25 * cap + 0.25 * earn)).round(0))
+        v = sub.sort_values("target", ascending=False).head(100)
+        disp = pd.DataFrame({"Credit Union": v.cu_name.values, "State": v.state.values,
+                             "Band": v.band.values, "Assets ($M)": (v.assets / 1e6).values,
+                             "Asset Growth": v.assets_growth.values,
+                             "Member Growth": v.members_growth.values,
+                             "Net Worth Ratio": v.nw_ratio.values, "ROA": v.roa.values,
+                             "Efficiency": v.efficiency.values,
+                             "Target Score": v.target.values})
+        pctcols = ["Asset Growth", "Member Growth", "Net Worth Ratio", "ROA", "Efficiency"]
+        colcfg = {"Assets ($M)": st.column_config.NumberColumn("Assets ($M)", format="$%.0f"),
+                  "Target Score": st.column_config.ProgressColumn(
+                      "Target Score", min_value=0, max_value=100, format="%d")}
+        for c2 in pctcols:
+            colcfg[c2] = st.column_config.NumberColumn(c2, format="%.2f%%")
+        disp.insert(0, "Rank", range(1, len(disp) + 1))
+        colcfg["Rank"] = st.column_config.NumberColumn("Rank", format="%d", width="small")
+        st.caption(f"Top {len(v):,} of {len(sub):,} candidates in {label}, {cycle}. Higher "
+                   "score = more target-like. Equal-weighted (25% each): size (smaller), "
+                   "growth (shrinking), capital (thinner net worth), and earnings (low ROA / "
+                   "high efficiency) — each scored as a percentile within this universe. A "
+                   "screen, not a recommendation.")
+        st.dataframe(disp, use_container_width=True, hide_index=True, height=560,
+                     column_config=colcfg)
+
+# ============================================================ DATA QUALITY
+elif page == "Data quality":
+    st.subheader("Data quality")
+    cs = sorted(health, reverse=True)
+    n_err = sum(1 for h in health.values() if h["status"] == "error")
+    n_warn = sum(1 for h in health.values() if h["status"] == "warn")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Cycles", len(health))
+    m2.metric("Latest cycle", cs[0] if cs else "—")
+    m3.metric("Errors", n_err)
+    m4.metric("Warnings", n_warn)
+
+    if cs:
+        cov = pd.DataFrame(
+            {"Credit Unions": [health[c]["cu_count"] for c in sorted(health)]},
+            index=sorted(health))
+        st.caption("Credit-union count by cycle — a sharp drop usually means a partial ingest")
+        st.line_chart(cov)
+
+    badge = {"ok": "🟢 OK", "warn": "🟡 Warning", "error": "🔴 Error"}
+    rows = []
+    for c in cs:
+        h = health[c]
+        rows.append({"Cycle": c, "Status": badge[h["status"]],
+                     "Credit Unions": f"{h['cu_count']:,}",
+                     "Missing income": f"{h['zero_income_pct']*100:.0f}%",
+                     "Missing assets": f"{h['zero_assets_pct']*100:.0f}%",
+                     "Out-of-range ratios": f"{h['implausible_pct']*100:.1f}%",
+                     "Notes": " ".join(h["issues"]) if h["issues"] else "—"})
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True, height=420)
+    st.caption("Checks per cycle: missing interest income (>30% → error), missing assets "
+               "(>10% → error), credit-union count drop vs the prior cycle (>25% → error, "
+               ">10% → warning), broken year-to-date income accumulation, and clusters of "
+               "out-of-range ratios (>5% → warning). Flagged cycles also show missing (—) or "
+               "suppressed figures in the rate views.")
