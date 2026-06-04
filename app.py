@@ -1454,6 +1454,154 @@ def multi_cu_series(cus, metric, labels, cycle_sig):
     return pd.DataFrame(out)
 
 
+# ---- NCUA FPR (Financial Performance Report) ratio engine ----------------
+# Reproduces the FPR's Key Ratios / Historical Ratios from the 5300 data, on the
+# FPR average-balance basis (current period + prior year-end ÷ 2); income is
+# annualized year-to-date. Only verified account codes are used; line items that
+# would need codes not in the dataset are omitted rather than guessed.
+FPR_SECTIONS = [
+    ("Capital Adequacy", [
+        ("Net Worth / Total Assets", "nw_ratio", "pct"),
+        ("Delinquent Loans / Net Worth", "delinq_nw", "pct"),
+    ]),
+    ("Asset Quality", [
+        ("Delinquent Loans / Total Loans", "delinq_loans", "pct"),
+        ("Net Charge-Offs / Average Loans", "nco", "pct"),
+        ("Delinquent Loans / Total Assets", "delinq_assets", "pct"),
+    ]),
+    ("Earnings", [
+        ("Return on Average Assets", "roaa", "pct"),
+        ("Gross Income / Average Assets", "gross_avg", "pct"),
+        ("Yield on Average Loans", "yl", "pct"),
+        ("Yield on Average Investments", "yi", "pct"),
+        ("Yield on Average Earning Assets", "yea", "pct"),
+        ("Fee & Other Income / Average Assets", "fee_avg", "pct"),
+        ("Cost of Funds / Average Funding", "cof", "pct"),
+        ("Interest Expense / Average Assets", "intexp_avg", "pct"),
+        ("Net Interest Margin / Average Assets", "nim", "pct"),
+        ("Operating Expense / Average Assets", "opex_avg", "pct"),
+        ("Provision for Loan Losses / Average Assets", "prov_avg", "pct"),
+        ("Operating Expense / Gross Income", "op_gross", "pct"),
+    ]),
+    ("Asset / Liability Management", [
+        ("Total Loans / Total Shares", "loans_shares", "pct"),
+        ("Total Loans / Total Assets", "loans_assets", "pct"),
+        ("Total Shares / Total Assets", "shares_assets", "pct"),
+        ("Borrowings / Total Shares", "borrow_shares", "pct"),
+        ("Cash / Total Assets", "cash_assets", "pct"),
+    ]),
+    ("Productivity", [
+        ("Members", "members", "num"),
+        ("Average Share Balance per Member", "avg_shares_member", "money"),
+    ]),
+    ("Growth Rates (year-over-year)", [
+        ("Total Assets", "g_assets", "pct"),
+        ("Total Loans", "g_loans", "pct"),
+        ("Total Shares", "g_shares", "pct"),
+        ("Net Worth", "g_nw", "pct"),
+        ("Members", "g_members", "pct"),
+    ]),
+]
+
+
+def _fpr_ratio_dict(raw, cyc, cycle_sig):
+    """Every FPR key ratio for one CU at one cycle, from the raw account dict."""
+    cur = raw.get(cyc) or {}
+    if not cur:
+        return {}
+    pye_c = f"{int(cyc[:4]) - 1}-12"
+    pye = raw.get(pye_c) if pye_c in cycle_sig else None
+    yago = raw.get(f"{int(cyc[:4]) - 1}-{cyc[-2:]}")
+    factor = 12 / int(cyc[-2:])
+    ys = _ys_ratios(cur, pye, factor)
+    aa = ys.get("avg_assets")
+
+    def val(c, d=cur):
+        v = d.get(c) if d else None
+        return v if isinstance(v, (int, float)) and v == v else None
+
+    def avg(c):
+        a, b = val(c), (val(c, pye) if pye else None)
+        if not pye or b is None or b <= 0:
+            return a
+        return ((a or 0.0) + b) / 2.0
+
+    def rt(n, den):
+        return 100 * n / den if (n is not None and den not in (None, 0)) else None
+
+    def ann_assets(c):
+        n = val(c)
+        return rt(n * factor, aa) if (n is not None and aa) else None
+
+    def grow(c):
+        a, b = val(c), val(c, yago)
+        return rt(a - b, b) if (a is not None and b not in (None, 0)) else None
+
+    assets, loans, shares = val("ACCT_010"), val("ACCT_025B"), val("ACCT_018")
+    nw, members, deln = val("ACCT_997"), val("ACCT_083"), val("ACCT_041B")
+    ni, noni, opex = val("ACCT_661A"), val("ACCT_117"), val("ACCT_671")
+    ii, ie = val("ACCT_115"), val("ACCT_350")
+    nii = (ii or 0) - (ie or 0) if (ii is not None or ie is not None) else None
+    prov = (((nii or 0) + (noni or 0) - (opex or 0) + (val("ACCT_440") or 0)) - ni
+            if ni is not None else None)
+    co, rec = val("ACCT_550"), val("ACCT_551")
+    nco_amt = ((co or 0) - (rec or 0)) if (co is not None or rec is not None) else None
+    gross = ((ii or 0) + (noni or 0)) if (ii is not None or noni is not None) else None
+
+    d = dict(ys)                                          # yl, yi, yea, cof, spread, nim
+    d.update({
+        "nw_ratio": rt(nw, assets),
+        "delinq_nw": rt(deln, nw),
+        "delinq_loans": rt(deln, loans),
+        "delinq_assets": rt(deln, assets),
+        "nco": (rt(nco_amt * factor, avg("ACCT_025B")) if nco_amt is not None else None),
+        "roaa": (rt(ni * factor, aa) if (ni is not None and aa) else None),
+        "gross_avg": (rt(gross * factor, aa) if (gross is not None and aa) else None),
+        "fee_avg": ann_assets("ACCT_117"),
+        "opex_avg": ann_assets("ACCT_671"),
+        "prov_avg": (rt(prov * factor, aa) if (prov is not None and aa) else None),
+        "intexp_avg": ann_assets("ACCT_350"),
+        "op_gross": (rt(opex, gross) if (opex is not None and gross) else None),
+        "loans_shares": rt(loans, shares),
+        "loans_assets": rt(loans, assets),
+        "shares_assets": rt(shares, assets),
+        "borrow_shares": rt(val("ACCT_860C"), shares),
+        "cash_assets": rt((val("ACCT_730A") or 0) + (val("ACCT_730B") or 0), assets),
+        "members": members,
+        "avg_shares_member": (shares / members if (shares is not None and members) else None),
+        "g_assets": grow("ACCT_010"), "g_loans": grow("ACCT_025B"),
+        "g_shares": grow("ACCT_018"), "g_nw": grow("ACCT_997"),
+        "g_members": grow("ACCT_083"),
+    })
+    return d
+
+
+def _fmt_ratio(v, fmt):
+    if v is None:
+        return "—"
+    if fmt == "pct":
+        return pct(v)
+    if fmt == "money":
+        return money(v)
+    if fmt == "num":
+        return f"{v:,.0f}"
+    return str(v)
+
+
+def fpr_ratio_table(raw, periods, mode, cycle_sig):
+    labels = [_period_label(p, mode) for p in periods]
+    dicts = {p: _fpr_ratio_dict(raw, p, cycle_sig) for p in periods}
+    rows = []
+    for sec, items in FPR_SECTIONS:
+        rows.append({"": sec, **{lb: "" for lb in labels}})
+        for lbl, key, fmt in items:
+            rec = {"": lbl}
+            for p, lb in zip(periods, labels):
+                rec[lb] = _fmt_ratio(dicts[p].get(key), fmt)
+            rows.append(rec)
+    return pd.DataFrame(rows)
+
+
 # ---------------------------------------------------------------------------- UI
 
 st.title("NCUA Call Report Explorer")
@@ -1471,9 +1619,9 @@ health = data_health(sig)
 st.sidebar.markdown("#### Call Report Explorer")
 
 # ---- Sidebar: navigation (grouped by workflow, icon-labeled) ----
-NAV = ["Profile", "Compare", "Chart", "Rankings", "Yields", "M&A Targets",
+NAV = ["Profile", "FPR", "Compare", "Chart", "Rankings", "Yields", "M&A Targets",
        "Movers", "Merger History", "Industry", "Data Health"]
-NAV_ICON = {"Profile": "👤", "Compare": "⚖️", "Chart": "📊", "Rankings": "🏆",
+NAV_ICON = {"Profile": "👤", "FPR": "📄", "Compare": "⚖️", "Chart": "📊", "Rankings": "🏆",
             "Yields": "📈", "M&A Targets": "🎯", "Movers": "🚀",
             "Merger History": "🔀", "Industry": "🏛️", "Data Health": "🩺"}
 page = st.sidebar.radio("View", NAV, format_func=lambda p: f"{NAV_ICON[p]}  {p}",
@@ -1878,6 +2026,57 @@ if page == "Profile":
                 else:
                     st.info("No absorbed mergers recorded for this credit union in the "
                             "NCUA Insurance Report of Activity.")
+
+# ============================================================ FPR
+elif page == "FPR":
+    st.subheader("Financial Performance Report")
+    cu_keys = list(ALL_LABELS)
+    if not cu_keys:
+        st.info("No credit unions available for this cycle.")
+    else:
+        default_cu = next((c for c in cu_keys if str(c) == "61790"), cu_keys[0])
+        h1, h2, h3 = st.columns([2, 2, 1])
+        cu_pick = h1.selectbox("Credit union", cu_keys,
+                               index=cu_keys.index(default_cu),
+                               format_func=lambda c: ALL_LABELS[c])
+        view = h2.radio("Report", ["Financial Summary", "Key Ratios", "Historical Ratios"],
+                        horizontal=True)
+        pmode = h3.radio("Period", ["Quarters", "Years"], horizontal=True, key="fpr_span")
+        info = mt[mt.cu == cu_pick]
+        st_, band = (info.state.iloc[0] if not info.empty else ""), \
+                    (info.band.iloc[0] if not info.empty else "")
+        nm = ALL_LABELS[cu_pick].split(" (#")[0]
+        st.caption(f"**{nm}** · Charter #{cu_pick} · {st_} · Peer group (asset band): "
+                   f"{band} · As of {cycle}")
+        raw = cu_statement_raw(cu_pick, sig)
+
+        if view == "Financial Summary":
+            st.markdown("##### Statement of Financial Condition")
+            bs = build_statement(cu_pick, BALANCE_SHEET, False, pmode, cycle, sig)
+            st.dataframe(bs, use_container_width=True, hide_index=True)
+            st.markdown("##### Statement of Income (year-to-date)")
+            inc = build_statement(cu_pick, INCOME_STATEMENT, False, pmode, cycle, sig)
+            st.dataframe(inc, use_container_width=True, hide_index=True)
+            st.caption("Dollar figures as reported on the NCUA 5300 Call Report; income is "
+                       "year-to-date as of each period.")
+        else:
+            cs = sorted(sig)
+            pool = [c for c in cs if c <= cycle and (pmode != "Years" or c.endswith("-12"))]
+            if view == "Key Ratios":
+                n = 5 if pmode == "Years" else 6
+            else:
+                n = 10 if pmode == "Years" else 13
+            periods = pool[-n:][::-1]
+            if not periods:
+                st.info("No periods available for this selection.")
+            else:
+                tbl = fpr_ratio_table(raw, periods, pmode, sig)
+                st.dataframe(tbl, use_container_width=True, hide_index=True, height=680)
+                st.caption("Computed from the 5300 data on the NCUA FPR average-balance basis "
+                           "(current period + prior year-end ÷ 2); income annualized "
+                           "year-to-date, growth rates year-over-year. Line items needing "
+                           "account codes not in this dataset (e.g. FTE-based productivity, "
+                           "classified assets) are omitted.")
 
 # ============================================================ COMPARE
 elif page == "Compare":
