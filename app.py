@@ -27,7 +27,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="NCUA Call Report Explorer", layout="wide")
+st.set_page_config(page_title="NCUA Call Report Explorer", page_icon="🧭", layout="wide")
 
 DATA_DIR = Path("data")
 SKIP_TABLES = {"Readme", "Report1"}
@@ -1468,7 +1468,7 @@ sig = tuple(sorted(all_cycles))
 health = data_health(sig)
 
 # ---- Sidebar: brand ----
-st.sidebar.markdown("#### 📊 Call Report Explorer")
+st.sidebar.markdown("#### 🧭 Call Report Explorer")
 
 # ---- Sidebar: navigation (grouped by workflow, icon-labeled) ----
 NAV = ["Profile", "Compare", "Chart", "Rankings", "Yields", "M&A Targets",
@@ -1955,8 +1955,12 @@ elif page == "Chart":
         b = c2.number_input(f"{label} max", value=dflt[1], key=f"{key}_hi", format="%g")
         return [a, b] if b > a else None
 
-    _BASE = dict(height=480, hovermode="x unified", margin=dict(l=10, r=10, t=30, b=10),
-                 legend=dict(orientation="h", y=1.1, x=0))
+    def styled(fig, title):
+        fig.update_layout(title=dict(text=title, x=0, xanchor="left", font=dict(size=16)),
+                          height=500, hovermode="x unified",
+                          margin=dict(l=10, r=10, t=48, b=44),
+                          legend=dict(orientation="h", yanchor="top", y=-0.14, x=0))
+        return fig
 
     if len(in_range) < 2:
         st.info("Pick a range spanning at least two periods to plot a trend.")
@@ -1984,11 +1988,17 @@ elif page == "Chart":
             if not allvals:
                 st.info("No data for this measure over the selected range.")
             else:
+                names = [t.name for t in fig.data]
+                who = (names[0] if len(names) == 1
+                       else ", ".join(names) if len(names) <= 3
+                       else f"{len(names)} credit unions")
+                title = st.text_input("Chart title", value=f"{CHART_LABEL[metric]} — {who}",
+                                      key="ct_cmp_" + metric + "_" + "_".join(map(str, picks)))
                 yr = manual_range("y-axis", (min(allvals), max(allvals)), "cmp_y")
                 fig.update_yaxes(title=CHART_LABEL[metric], **axis_kw(chart_kind(metric)))
                 if yr:
                     fig.update_yaxes(range=yr)
-                fig.update_layout(**_BASE)
+                styled(fig, title)
                 st.plotly_chart(fig, use_container_width=True)
                 st.caption(f"{CHART_LABEL[metric]} ({span.lower()}), {idx[0]}–{idx[-1]}. "
                            "Drag on the plot to zoom; double-click to autoscale. Yields use the "
@@ -2013,6 +2023,9 @@ elif page == "Chart":
                               index=metric_keys.index("assets"), key="dual_b")
             yA = pd.to_numeric(s[mA], errors="coerce") if mA in s else pd.Series(dtype=float)
             yB = pd.to_numeric(s[mB], errors="coerce") if mB in s else pd.Series(dtype=float)
+            title = st.text_input("Chart title",
+                                  value=f"{cu_name}: {CHART_LABEL[mA]} vs {CHART_LABEL[mB]}",
+                                  key=f"ct_dual_{cu_pick}_{mA}_{mB}")
             rngL = manual_range(f"{CHART_LABEL[mA]} (left)", minmax(yA), "dualL")
             rngR = manual_range(f"{CHART_LABEL[mB]} (right)", minmax(yB), "dualR")
             yL = dict(title=CHART_LABEL[mA], **axis_kw(chart_kind(mA)))
@@ -2026,7 +2039,8 @@ elif page == "Chart":
                                      name=CHART_LABEL[mA], yaxis="y", connectgaps=True))
             fig.add_trace(go.Scatter(x=idx, y=yB.values, mode=line_mode,
                                      name=CHART_LABEL[mB], yaxis="y2", connectgaps=True))
-            fig.update_layout(yaxis=yL, yaxis2=yR, **_BASE)
+            fig.update_layout(yaxis=yL, yaxis2=yR)
+            styled(fig, title)
             st.plotly_chart(fig, use_container_width=True)
             st.caption(f"{cu_name} — {CHART_LABEL[mA]} (left axis) vs {CHART_LABEL[mB]} "
                        f"(right axis), {idx[0]}–{idx[-1]} ({span.lower()}).")
@@ -2036,6 +2050,9 @@ elif page == "Chart":
             if not sel:
                 st.info("Choose at least one measure.")
             else:
+                title = st.text_input("Chart title", value=f"{cu_name} — selected measures",
+                                      key=f"ct_sm_{cu_pick}_" + "_".join(sel))
+                st.markdown(f"#### {title}")
                 st.caption(f"{cu_name} — each measure on its own axis, {idx[0]}–{idx[-1]} "
                            f"({span.lower()}). Tick “Overlay two measures on dual axes” above "
                            "to combine two on a single chart with independent scales.")
