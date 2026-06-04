@@ -1401,18 +1401,59 @@ if "FOICU" not in tables:
 
 all_cycles = cycles()
 sig = tuple(sorted(all_cycles))
-
 health = data_health(sig)
+
+# ---- Sidebar: brand ----
+st.sidebar.markdown("#### 📊 Call Report Explorer")
+
+# ---- Sidebar: navigation (grouped by workflow, icon-labeled) ----
+NAV = ["Profile", "Compare", "Rankings", "Rates", "Targets",
+       "Movers", "Mergers", "Industry", "Data quality"]
+NAV_ICON = {"Profile": "👤", "Compare": "⚖️", "Rankings": "🏆", "Rates": "📈",
+            "Targets": "🎯", "Movers": "🚀", "Mergers": "🔀", "Industry": "🏛️",
+            "Data quality": "🩺"}
+page = st.sidebar.radio("View", NAV, format_func=lambda p: f"{NAV_ICON[p]}  {p}",
+                        label_visibility="collapsed")
+
+# ---- Sidebar: controls (Quarter always; growth/lens only where they apply) ----
+st.sidebar.divider()
+st.sidebar.caption("Settings")
+cycle = st.sidebar.selectbox("Quarter", all_cycles)
+
+SCORING_PAGES = {"Profile", "Compare", "Rankings"}        # show the score-lens picker
+GROWTH_PAGES = {"Profile", "Compare", "Rankings", "Targets", "Movers"}  # show growth basis
+st.session_state.setdefault("growth_label", "Year-over-year")
+st.session_state.setdefault("score_lens", list(SCORE_LENSES)[0])
+
+if page in GROWTH_PAGES:
+    growth_label = st.sidebar.selectbox(
+        "Growth basis", ["Year-over-year", "Quarter-over-quarter (annualized)"],
+        key="growth_label")
+else:
+    growth_label = st.session_state.growth_label
+basis = "YoY" if growth_label.startswith("Year") else "QoQ"
+
+if page in SCORING_PAGES:
+    lens = st.sidebar.selectbox(
+        "Score lens", list(SCORE_LENSES), key="score_lens",
+        help="Momentum weights growth heaviest (who's expanding fastest). Performance "
+             "weights earnings, capital, and asset quality (who's financially strongest).")
+else:
+    lens = st.session_state.score_lens
+weights = SCORE_LENSES[lens]
+
+# ---- Sidebar: data-health status (footer; auto-opens only when flagged) ----
 _worst = ("error" if any(h["status"] == "error" for h in health.values())
           else "warn" if any(h["status"] == "warn" for h in health.values()) else "ok")
 _icon = {"ok": "🟢", "warn": "🟡", "error": "🔴"}[_worst]
 _bad = sum(1 for h in health.values() if h["status"] != "ok")
-_hdr = ("Data health" if _worst == "ok"
+st.sidebar.divider()
+_hdr = ("Data health — all clear" if _worst == "ok"
         else f"Data health — {_bad} cycle{'s' if _bad != 1 else ''} flagged")
-with st.sidebar.expander(f"{_icon} {_hdr}", expanded=(_worst == "error")):
+with st.sidebar.expander(f"{_icon} {_hdr}", expanded=(_worst != "ok")):
     if _worst == "ok":
         st.caption(f"All {len(health)} cycles passed validation "
-                   "(coverage, year-to-date accumulation, and ratio sanity).")
+                   "(coverage, year-to-date accumulation, ratio sanity).")
     else:
         st.caption("Flagged cycles may show missing (—) or unreliable figures. "
                    "Re-check the affected partitions and re-run the ingest.")
@@ -1425,18 +1466,6 @@ with st.sidebar.expander(f"{_icon} {_hdr}", expanded=(_worst == "error")):
             for msg in h["issues"]:
                 st.caption("• " + msg)
 
-page = st.sidebar.radio("View", ["Profile", "Compare", "Rankings", "Rates", "Movers",
-                                 "Mergers", "Targets", "Industry", "Data quality"])
-st.sidebar.divider()
-cycle = st.sidebar.selectbox("Quarter", all_cycles)
-growth_label = st.sidebar.selectbox(
-    "Growth basis", ["Year-over-year", "Quarter-over-quarter (annualized)"])
-basis = "YoY" if growth_label.startswith("Year") else "QoQ"
-lens = st.sidebar.selectbox(
-    "Score lens", list(SCORE_LENSES),
-    help="Momentum weights growth heaviest (who's expanding fastest). Performance "
-         "weights earnings, capital, and asset quality (who's financially strongest).")
-weights = SCORE_LENSES[lens]
 mt = enriched_table(cycle, basis, lens, sig)
 
 # label helper shared across pages
