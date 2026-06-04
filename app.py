@@ -1918,45 +1918,54 @@ elif page == "Chart":
     import plotly.graph_objects as go
     st.subheader("Chart builder")
     PALETTE = ["#2563eb", "#dc2626", "#059669", "#d97706", "#7c3aed", "#0891b2"]
-    mode = st.radio("Chart type",
-                    ["Compare credit unions on one measure",
-                     "One credit union across measures"], horizontal=True)
 
-    tf1, tf2 = st.columns([1, 3])
-    span = tf1.radio("Period", ["Quarters", "Years"], horizontal=True, key="chart_span")
-    cyc_opts = [c for c in sorted(all_cycles) if span == "Quarters" or c.endswith("-12")]
-    if len(cyc_opts) >= 2:
-        lo, hi = tf2.select_slider("Range", options=cyc_opts, value=(cyc_opts[0], cyc_opts[-1]),
-                                   format_func=lambda c: _period_label(c, span))
-        in_range = [c for c in cyc_opts if lo <= c <= hi]
-    else:
-        in_range = cyc_opts
+    chart_slot = st.container()                       # chart renders here (on top)
+    tab_data, tab_style, tab_notes = st.tabs(["Data", "Style", "Annotations & axis"])
+
+    with tab_data:
+        mode = st.radio("Chart type",
+                        ["Compare credit unions on one measure",
+                         "One credit union across measures"], horizontal=True)
+        tf1, tf2 = st.columns([1, 3])
+        span = tf1.radio("Period", ["Quarters", "Years"], horizontal=True, key="chart_span")
+        cyc_opts = [c for c in sorted(all_cycles) if span == "Quarters" or c.endswith("-12")]
+        if len(cyc_opts) >= 2:
+            lo, hi = tf2.select_slider("Range", options=cyc_opts,
+                                       value=(cyc_opts[0], cyc_opts[-1]),
+                                       format_func=lambda c: _period_label(c, span))
+            in_range = [c for c in cyc_opts if lo <= c <= hi]
+        else:
+            in_range = cyc_opts
     idx = [_period_label(c, span) for c in in_range]
 
-    o1, o2, o3, o4 = st.columns(4)
-    markers = o1.checkbox("Markers", value=True)
-    label_mode = o2.selectbox("Data labels", ["None", "All points", "First & last", "Last only"])
-    label_pos = o3.selectbox("Label position", ["Top", "Bottom", "Right", "Left"])
-    title_align = o4.selectbox("Title align", ["Left", "Center", "Right"])
-
-    with st.expander("Customize chart"):
-        cc1, cc2, cc3 = st.columns(3)
-        gridlines = cc1.checkbox("Y gridlines", value=True)
-        legend_on = cc2.checkbox("Legend", value=True)
-        direct_labels = cc3.checkbox("Label lines at end", value=False,
+    with tab_style:
+        cc1, cc2, cc3, cc4 = st.columns(4)
+        markers = cc1.checkbox("Markers", value=True)
+        label_mode = cc2.selectbox("Data labels",
+                                   ["None", "All points", "First & last", "Last only"])
+        label_pos = cc3.selectbox("Label position", ["Top", "Bottom", "Right", "Left"])
+        title_align = cc4.selectbox("Title align", ["Left", "Center", "Right"])
+        cd1, cd2, cd3 = st.columns(3)
+        gridlines = cd1.checkbox("Y gridlines", value=True)
+        legend_on = cd2.checkbox("Legend", value=True)
+        direct_labels = cd3.checkbox("Label lines at end", value=False,
                                      help="Datawrapper-style: name each line at its right "
                                           "end and hide the legend.")
-        cd1, cd2, cd3 = st.columns(3)
-        smooth = cd1.checkbox("Smooth lines", value=False)
-        line_width = cd2.slider("Line width", 1, 6, 2)
-        height = cd3.slider("Height", 320, 760, 460, step=20)
+        ce1, ce2, ce3 = st.columns(3)
+        smooth = ce1.checkbox("Smooth lines", value=False)
+        line_width = ce2.slider("Line width", 1, 6, 2)
+        height = ce3.slider("Height", 320, 760, 460, step=20)
+        accent = st.color_picker("Single-series color", value=PALETTE[0])
+        colors_box = st.container()                   # per-series pickers fill this
+
+    with tab_notes:
         subtitle = st.text_input("Subtitle", value="")
         source = st.text_input("Source / footnote", value="Source: NCUA 5300 Call Reports")
-        ce1, ce2, ce3 = st.columns(3)
-        ev_choice = ce1.selectbox("Mark a period", ["(none)"] + idx)
-        ev_label = ce2.text_input("Marker label", value="")
-        accent = ce3.color_picker("Single-series color", value=PALETTE[0])
+        cg1, cg2 = st.columns(2)
+        ev_choice = cg1.selectbox("Mark a period", ["(none)"] + idx)
+        ev_label = cg2.text_input("Marker label", value="")
         ev_x = None if ev_choice == "(none)" else ev_choice
+        range_box = st.container()                    # manual-range controls fill this
 
     labels_on = label_mode != "None"
     line_mode = ("lines+markers" if markers else "lines") + ("+text" if labels_on else "")
@@ -1999,20 +2008,19 @@ elif page == "Chart":
         v = pd.to_numeric(series, errors="coerce").dropna()
         return (float(v.min()), float(v.max())) if len(v) else (0.0, 1.0)
 
-    def manual_range(label, dflt, key):
-        if not st.checkbox(f"Set {label} range manually", key=f"{key}_on"):
+    def manual_range(box, label, dflt, key):
+        if not box.checkbox(f"Set {label} range manually", key=f"{key}_on"):
             return None
-        c1, c2 = st.columns(2)
+        c1, c2 = box.columns(2)
         a = c1.number_input(f"{label} min", value=dflt[0], key=f"{key}_lo", format="%g")
         b = c2.number_input(f"{label} max", value=dflt[1], key=f"{key}_hi", format="%g")
         return [a, b] if b > a else None
 
-    def series_colors(names, key):
-        with st.expander("Series colors"):
-            cols = st.columns(min(len(names), 6) or 1)
-            return {nm: cols[i % len(cols)].color_picker(nm, value=PALETTE[i % len(PALETTE)],
-                                                         key=f"{key}_{i}")
-                    for i, nm in enumerate(names)}
+    def series_colors(box, names, key):
+        cols = box.columns(min(len(names), 6) or 1)
+        return {nm: cols[i % len(cols)].color_picker(nm, value=PALETTE[i % len(PALETTE)],
+                                                     key=f"{key}_{i}")
+                for i, nm in enumerate(names)}
 
     def _last_valid(tr):
         ys = tr.y
@@ -2060,16 +2068,17 @@ elif page == "Chart":
         return fig
 
     if len(in_range) < 2:
-        st.info("Pick a range spanning at least two periods to plot a trend.")
+        chart_slot.info("Pick a range spanning at least two periods to plot a trend.")
 
     elif mode.startswith("Compare"):
-        metric = st.selectbox("Measure", metric_keys, format_func=lambda k: CHART_LABEL[k],
-                              index=metric_keys.index("nim"))
-        picks = st.multiselect("Credit unions (up to 6)", list(ALL_LABELS),
-                               default=[default_cu] if default_cu is not None else [],
-                               max_selections=6, format_func=lambda c: ALL_LABELS[c])
+        with tab_data:
+            metric = st.selectbox("Measure", metric_keys, format_func=lambda k: CHART_LABEL[k],
+                                  index=metric_keys.index("nim"))
+            picks = st.multiselect("Credit unions (up to 6)", list(ALL_LABELS),
+                                   default=[default_cu] if default_cu is not None else [],
+                                   max_selections=6, format_func=lambda c: ALL_LABELS[c])
         if not picks:
-            st.info("Choose at least one credit union.")
+            chart_slot.info("Choose at least one credit union.")
         else:
             series, allvals = [], []
             for c in picks:
@@ -2080,16 +2089,17 @@ elif page == "Chart":
                 allvals += list(y.dropna().values)
                 series.append((ALL_LABELS[c].split(" (#")[0], y))
             if not allvals:
-                st.info("No data for this measure over the selected range.")
+                chart_slot.info("No data for this measure over the selected range.")
             else:
                 names = [nm for nm, _ in series]
                 who = (names[0] if len(names) == 1
                        else ", ".join(names) if len(names) <= 3
                        else f"{len(names)} credit unions")
-                title = st.text_input("Chart title", value=f"{CHART_LABEL[metric]} — {who}",
-                                      key="ct_cmp_" + metric + "_" + "_".join(map(str, picks)))
-                colors = series_colors(names, "cmpcol")
-                yr = manual_range("y-axis", (min(allvals), max(allvals)), "cmp_y")
+                with tab_data:
+                    title = st.text_input("Chart title", value=f"{CHART_LABEL[metric]} — {who}",
+                                          key="ct_cmp_" + metric + "_" + "_".join(map(str, picks)))
+                colors = series_colors(colors_box, names, "cmpcol")
+                yr = manual_range(range_box, "y-axis", (min(allvals), max(allvals)), "cmp_y")
                 fig = go.Figure()
                 for nm, y in series:
                     col = colors[nm]
@@ -2101,39 +2111,42 @@ elif page == "Chart":
                 if yr:
                     fig.update_yaxes(range=yr)
                 styled(fig, title)
-                st.plotly_chart(fig, use_container_width=True)
-                st.caption(f"{CHART_LABEL[metric]} ({span.lower()}), {idx[0]}–{idx[-1]}. "
-                           "Drag on the plot to zoom; double-click to autoscale. Yields use the "
-                           "NCUA FPR average-balance basis.")
+                chart_slot.plotly_chart(fig, use_container_width=True)
+                chart_slot.caption(f"{CHART_LABEL[metric]} ({span.lower()}), {idx[0]}–{idx[-1]}. "
+                                   "Drag on the plot to zoom; double-click to autoscale. Yields "
+                                   "use the NCUA FPR average-balance basis.")
 
     else:
-        cu_keys = list(ALL_LABELS)
-        cu_pick = st.selectbox("Credit union", cu_keys,
-                               index=cu_keys.index(default_cu) if default_cu in cu_keys else 0,
-                               format_func=lambda c: ALL_LABELS[c])
+        with tab_data:
+            cu_keys = list(ALL_LABELS)
+            cu_pick = st.selectbox("Credit union", cu_keys,
+                                   index=cu_keys.index(default_cu) if default_cu in cu_keys else 0,
+                                   format_func=lambda c: ALL_LABELS[c])
+            dual = st.checkbox("Overlay two measures on dual axes")
         cu_name = ALL_LABELS[cu_pick].split(" (#")[0]
-        dual = st.checkbox("Overlay two measures on dual axes")
         s = chart_series(cu_pick, sig)
         s = s.reindex(in_range) if not s.empty else s
         if s.empty:
-            st.info("No history for this credit union over the selected range.")
+            chart_slot.info("No history for this credit union over the selected range.")
         elif dual:
-            d1, d2 = st.columns(2)
-            mA = d1.selectbox("Left axis", metric_keys, format_func=lambda k: CHART_LABEL[k],
-                              index=metric_keys.index("nim"), key="dual_a")
-            mB = d2.selectbox("Right axis", metric_keys, format_func=lambda k: CHART_LABEL[k],
-                              index=metric_keys.index("assets"), key="dual_b")
+            with tab_data:
+                d1, d2 = st.columns(2)
+                mA = d1.selectbox("Left axis", metric_keys, format_func=lambda k: CHART_LABEL[k],
+                                  index=metric_keys.index("nim"), key="dual_a")
+                mB = d2.selectbox("Right axis", metric_keys, format_func=lambda k: CHART_LABEL[k],
+                                  index=metric_keys.index("assets"), key="dual_b")
+                title = st.text_input("Chart title",
+                                      value=f"{cu_name}: {CHART_LABEL[mA]} vs {CHART_LABEL[mB]}",
+                                      key=f"ct_dual_{cu_pick}_{mA}_{mB}")
             yA = pd.to_numeric(s[mA], errors="coerce") if mA in s else pd.Series(dtype=float)
             yB = pd.to_numeric(s[mB], errors="coerce") if mB in s else pd.Series(dtype=float)
-            title = st.text_input("Chart title",
-                                  value=f"{cu_name}: {CHART_LABEL[mA]} vs {CHART_LABEL[mB]}",
-                                  key=f"ct_dual_{cu_pick}_{mA}_{mB}")
-            cmap = series_colors([CHART_LABEL[mA], CHART_LABEL[mB]], "dualcol")
+            cmap = series_colors(colors_box, [CHART_LABEL[mA], CHART_LABEL[mB]], "dualcol")
             colA, colB = cmap[CHART_LABEL[mA]], cmap[CHART_LABEL[mB]]
-            rngL = manual_range(f"{CHART_LABEL[mA]} (left)", minmax(yA), "dualL")
-            rngR = manual_range(f"{CHART_LABEL[mB]} (right)", minmax(yB), "dualR")
+            rngL = manual_range(range_box, f"{CHART_LABEL[mA]} (left)", minmax(yA), "dualL")
+            rngR = manual_range(range_box, f"{CHART_LABEL[mB]} (right)", minmax(yB), "dualR")
             yL = dict(title=CHART_LABEL[mA], **axis_kw(chart_kind(mA)))
-            yR = dict(title=CHART_LABEL[mB], overlaying="y", side="right", **axis_kw(chart_kind(mB)))
+            yR = dict(title=CHART_LABEL[mB], overlaying="y", side="right",
+                      **axis_kw(chart_kind(mB)))
             if rngL:
                 yL["range"] = rngL
             if rngR:
@@ -2150,35 +2163,39 @@ elif page == "Chart":
                                      line=dict(color=colB, width=line_width, shape=LSHAPE)))
             fig.update_layout(yaxis=yL, yaxis2=yR)
             styled(fig, title)
-            st.plotly_chart(fig, use_container_width=True)
-            st.caption(f"{cu_name} — {CHART_LABEL[mA]} (left axis) vs {CHART_LABEL[mB]} "
-                       f"(right axis), {idx[0]}–{idx[-1]} ({span.lower()}).")
+            chart_slot.plotly_chart(fig, use_container_width=True)
+            chart_slot.caption(f"{cu_name} — {CHART_LABEL[mA]} (left axis) vs {CHART_LABEL[mB]} "
+                               f"(right axis), {idx[0]}–{idx[-1]} ({span.lower()}).")
         else:
-            sel = st.multiselect("Measures", metric_keys, format_func=lambda k: CHART_LABEL[k],
-                                 default=["nim", "roa", "efficiency", "nw_ratio"])
-            if not sel:
-                st.info("Choose at least one measure.")
-            else:
+            with tab_data:
+                sel = st.multiselect("Measures", metric_keys,
+                                     format_func=lambda k: CHART_LABEL[k],
+                                     default=["nim", "roa", "efficiency", "nw_ratio"])
                 title = st.text_input("Chart title", value=f"{cu_name} — selected measures",
                                       key=f"ct_sm_{cu_pick}_" + "_".join(sel))
-                st.markdown(f"<h4 style='text-align:{title_align.lower()};margin:0'>{title}</h4>",
-                            unsafe_allow_html=True)
-                st.caption(f"{cu_name} — each measure on its own axis, {idx[0]}–{idx[-1]} "
-                           f"({span.lower()}). Tick “Overlay two measures on dual axes” above "
-                           "to combine two on a single chart with independent scales.")
-                grid = st.columns(2)
-                for i, k in enumerate(sel):
-                    y = pd.to_numeric(s[k], errors="coerce") if k in s else pd.Series(dtype=float)
-                    fig = go.Figure(go.Scatter(
-                        x=idx, y=y.values, mode=line_mode, name=CHART_LABEL[k], connectgaps=True,
-                        text=txt(y, chart_kind(k)), textposition=POS, marker=dict(color=accent),
-                        line=dict(color=accent, width=line_width, shape=LSHAPE)))
-                    fig.update_yaxes(showgrid=gridlines, **axis_kw(chart_kind(k)))
-                    fig.update_xaxes(showgrid=False)
-                    fig.update_traces(textfont_size=9)
-                    fig.update_layout(height=max(220, height // 2), title=CHART_LABEL[k],
-                                      showlegend=False, margin=dict(l=10, r=10, t=40, b=10))
-                    grid[i % 2].plotly_chart(fig, use_container_width=True, key=f"sm_{i}_{k}")
+            if not sel:
+                chart_slot.info("Choose at least one measure.")
+            else:
+                with chart_slot:
+                    st.markdown(f"<h4 style='text-align:{title_align.lower()};margin:0'>{title}"
+                                "</h4>", unsafe_allow_html=True)
+                    st.caption(f"{cu_name} — each measure on its own axis, {idx[0]}–{idx[-1]} "
+                               f"({span.lower()}). Tick “Overlay two measures on dual axes” in the "
+                               "Data tab to combine two on a single chart with independent scales.")
+                    grid = st.columns(2)
+                    for i, k in enumerate(sel):
+                        y = pd.to_numeric(s[k], errors="coerce") if k in s else pd.Series(dtype=float)
+                        fig = go.Figure(go.Scatter(
+                            x=idx, y=y.values, mode=line_mode, name=CHART_LABEL[k],
+                            connectgaps=True, text=txt(y, chart_kind(k)), textposition=POS,
+                            marker=dict(color=accent),
+                            line=dict(color=accent, width=line_width, shape=LSHAPE)))
+                        fig.update_yaxes(showgrid=gridlines, **axis_kw(chart_kind(k)))
+                        fig.update_xaxes(showgrid=False)
+                        fig.update_traces(textfont_size=9)
+                        fig.update_layout(height=max(220, height // 2), title=CHART_LABEL[k],
+                                          showlegend=False, margin=dict(l=10, r=10, t=40, b=10))
+                        grid[i % 2].plotly_chart(fig, use_container_width=True, key=f"sm_{i}_{k}")
 
 # ============================================================ RANKINGS
 elif page == "Rankings":
