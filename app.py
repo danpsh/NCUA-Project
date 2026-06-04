@@ -2446,9 +2446,13 @@ elif page == "Rankings":
         if f == "stars":
             disp[lbl] = [stars_str(x) for x in view[k].values]            # keep ★ string
         elif f == "money":
-            col = f"{lbl} ($M)"
-            disp[col] = (view[k] / 1e6).values                            # numeric, in $M
-            colcfg[col] = st.column_config.NumberColumn(col, format="$%.1f")
+            if k == "assets":
+                disp[lbl] = view[k].round(0).values                       # full dollars
+                colcfg[lbl] = st.column_config.NumberColumn(lbl, format="$%,.0f")
+            else:
+                col = f"{lbl} ($M)"
+                disp[col] = (view[k] / 1e6).values                        # numeric, in $M
+                colcfg[col] = st.column_config.NumberColumn(col, format="$%.1f")
         elif f == "score":
             disp[lbl] = view[k].round(0).values                           # numeric 0–100
             colcfg[lbl] = st.column_config.ProgressColumn(
@@ -2664,8 +2668,9 @@ elif page == "Yields":
             st.info("No credit unions with valid figures for this filter.")
         else:
             disp = pd.DataFrame({"Credit Union": v.cu_name.values, "State": v.state.values,
-                                 "Assets ($M)": (v.assets / 1e6).values})
-            colcfg = {"Assets ($M)": st.column_config.NumberColumn("Assets ($M)", format="$%.0f")}
+                                 "Total Assets": v.assets.round(0).values})
+            colcfg = {"Total Assets": st.column_config.NumberColumn("Total Assets",
+                                                                    format="$%,.0f")}
             for k, lbl, _ in RATE_COLS:
                 disp[lbl] = v[k].values
                 colcfg[lbl] = st.column_config.NumberColumn(lbl, format="%.2f%%")
@@ -2706,14 +2711,14 @@ elif page == "M&A Targets":
                                         + 0.25 * cap + 0.25 * earn)).round(0))
         v = sub.sort_values("target", ascending=False)
         disp = pd.DataFrame({"Credit Union": v.cu_name.values, "State": v.state.values,
-                             "Band": v.band.values, "Assets ($M)": (v.assets / 1e6).values,
+                             "Band": v.band.values, "Total Assets": v.assets.round(0).values,
                              "Asset Growth": v.assets_growth.values,
                              "Member Growth": v.members_growth.values,
                              "Net Worth Ratio": v.nw_ratio.values, "ROA": v.roa.values,
                              "Efficiency": v.efficiency.values,
                              "Target Score": v.target.values})
         pctcols = ["Asset Growth", "Member Growth", "Net Worth Ratio", "ROA", "Efficiency"]
-        colcfg = {"Assets ($M)": st.column_config.NumberColumn("Assets ($M)", format="$%.0f"),
+        colcfg = {"Total Assets": st.column_config.NumberColumn("Total Assets", format="$%,.0f"),
                   "Target Score": st.column_config.ProgressColumn(
                       "Target Score", min_value=0, max_value=100, format="%d")}
         for c2 in pctcols:
