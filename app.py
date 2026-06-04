@@ -2116,7 +2116,15 @@ elif page == "Compare":
 elif page == "Chart":
     import plotly.graph_objects as go
     st.subheader("Chart builder")
-    PALETTE = ["#2563eb", "#dc2626", "#059669", "#d97706", "#7c3aed", "#0891b2"]
+    PALETTES = {
+        "Datawrapper default": ["#2563eb", "#dc2626", "#059669", "#d97706", "#7c3aed", "#0891b2"],
+        "Colorblind-safe":     ["#0072b2", "#e69f00", "#009e73", "#d55e00", "#cc79a7", "#56b4e9"],
+        "Vivid":               ["#4f46e5", "#ef4444", "#10b981", "#f59e0b", "#ec4899", "#06b6d4"],
+        "Muted":               ["#5b7aa6", "#b5685f", "#6a9a78", "#c39a52", "#8a76a8", "#5f97a3"],
+        "Blue ramp":           ["#08306b", "#2171b5", "#4292c6", "#6baed6", "#9ecae1", "#74a9cf"],
+        "Grayscale":           ["#1f1f1f", "#555555", "#777777", "#999999", "#b5b5b5", "#cfcfcf"],
+    }
+    MUTED_COLOR = "#c9ced6"          # greyed-out lines when emphasizing a subset
 
     chart_slot = st.container()                       # chart renders here (on top)
     tab_data, tab_style, tab_notes = st.tabs(["Data", "Style", "Annotations & axis"])
@@ -2154,7 +2162,23 @@ elif page == "Chart":
         smooth = ce1.checkbox("Smooth lines", value=False)
         line_width = ce2.slider("Line width", 1, 6, 2)
         height = ce3.slider("Height", 320, 760, 460, step=20)
-        accent = st.color_picker("Single-series color", value=PALETTE[0])
+        cf1, cf2 = st.columns([1, 1])
+        palette_name = cf1.selectbox("Color palette", list(PALETTES),
+                                     help="Sets the default colours for every line. "
+                                          "Per-series pickers below still override.")
+        area_fill = cf2.checkbox("Fill area under lines", value=False,
+                                 help="Shade a translucent area beneath each line "
+                                      "(Compare and small-multiples views).")
+        PALETTE = PALETTES[palette_name]
+        cx1, cx2 = st.columns([1, 1])
+        export_fmt = cx1.selectbox("Download format", ["PNG", "SVG"],
+                                   help="Sets the camera-icon download button on the chart "
+                                        "toolbar. SVG is vector — best for decks and print.")
+        export_scale = cx2.select_slider("PNG resolution", options=[1, 2, 3], value=2,
+                                         disabled=export_fmt != "PNG",
+                                         help="1×/2×/3× pixel density for the PNG download.")
+        accent = st.color_picker("Single-series color", value=PALETTE[0],
+                                 key=f"accent_{palette_name}")
         colors_box = st.container()                   # per-series pickers fill this
 
     with tab_notes:
@@ -2164,6 +2188,12 @@ elif page == "Chart":
         ev_choice = cg1.selectbox("Mark a period", ["(none)"] + idx)
         ev_label = cg2.text_input("Marker label", value="")
         ev_x = None if ev_choice == "(none)" else ev_choice
+        cb1, cb2, cb3 = st.columns([2, 2, 3])
+        band_a = cb1.selectbox("Shade from", ["(none)"] + idx, key="band_from",
+                               help="Highlight a span of periods with a shaded band "
+                                    "(e.g. a rate-hike cycle).")
+        band_b = cb2.selectbox("Shade to", ["(none)"] + idx, key="band_to")
+        band_label = cb3.text_input("Band label", value="", key="band_lbl")
         range_box = st.container()                    # manual-range controls fill this
 
     labels_on = label_mode != "None"
@@ -2182,6 +2212,14 @@ elif page == "Chart":
         if kind == "money":
             return dict(tickprefix="$", tickformat="~s")
         return dict(tickformat=",")
+
+    def rgba(hexc, a):
+        h = hexc.lstrip("#")
+        r, g, bl = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+        return f"rgba({r},{g},{bl},{a})"
+
+    def fill_kw(col):
+        return dict(fill="tozeroy", fillcolor=rgba(col, 0.12)) if area_fill else {}
 
     def lab(kind, v):
         if pd.isna(v):
@@ -2254,6 +2292,16 @@ elif page == "Chart":
             if ev_label:
                 fig.add_annotation(x=ev_x, xref="x", yref="paper", y=1.0, yanchor="bottom",
                                    text=ev_label, showarrow=False, font=dict(size=11, color="#666"))
+        if band_a != "(none)" and band_b != "(none)":
+            ia, ib = idx.index(band_a), idx.index(band_b)
+            if ib < ia:
+                ia, ib = ib, ia
+            fig.add_vrect(x0=ia - 0.5, x1=ib + 0.5, fillcolor="#9aa7b8", opacity=0.14,
+                          line_width=0, layer="below")
+            if band_label:
+                fig.add_annotation(x=(ia + ib) / 2, xref="x", yref="paper", y=1.0,
+                                   yanchor="bottom", text=band_label, showarrow=False,
+                                   font=dict(size=11, color="#666"))
         if direct_labels:
             for tr in fig.data:
                 lv = _last_valid(tr)
@@ -2265,6 +2313,13 @@ elif page == "Chart":
                                    showarrow=False, xanchor="left", xshift=8,
                                    font=dict(size=11, color=col))
         return fig
+
+    def export_config(title):
+        fn = re.sub(r"[^A-Za-z0-9._-]+", "_", title or "chart").strip("_") or "chart"
+        opts = {"format": export_fmt.lower(), "filename": fn}
+        if export_fmt == "PNG":
+            opts["scale"] = export_scale
+        return dict(displaylogo=False, toImageButtonOptions=opts, responsive=True)
 
     if len(in_range) < 2:
         chart_slot.info("Pick a range spanning at least two periods to plot a trend.")
@@ -2297,20 +2352,31 @@ elif page == "Chart":
                 with tab_data:
                     title = st.text_input("Chart title", value=f"{CHART_LABEL[metric]} — {who}",
                                           key="ct_cmp_" + metric + "_" + "_".join(map(str, picks)))
-                colors = series_colors(colors_box, names, "cmpcol")
+                    emph = st.multiselect("Emphasize lines (others muted)", names, default=[],
+                                          key="emph_" + "_".join(map(str, picks)),
+                                          help="Datawrapper-style highlight: keep the chosen "
+                                               "lines in colour and grey out the rest.")
+                colors = series_colors(colors_box, names, "cmpcol_" + palette_name)
                 yr = manual_range(range_box, "y-axis", (min(allvals), max(allvals)), "cmp_y")
+                kind = chart_kind(metric)
+                ordered = sorted(series, key=lambda t: bool(emph) and t[0] in emph)
                 fig = go.Figure()
-                for nm, y in series:
-                    col = colors[nm]
-                    fig.add_trace(go.Scatter(x=idx, y=y.values, mode=line_mode, name=nm,
-                                             connectgaps=True, text=txt(y, chart_kind(metric)),
-                                             textposition=POS, marker=dict(color=col),
-                                             line=dict(color=col, width=line_width, shape=LSHAPE)))
-                fig.update_yaxes(title=CHART_LABEL[metric], **axis_kw(chart_kind(metric)))
+                for nm, y in ordered:
+                    on = (not emph) or (nm in emph)
+                    col = colors[nm] if on else MUTED_COLOR
+                    wid = line_width if on else max(1, line_width - 1)
+                    fig.add_trace(go.Scatter(
+                        x=idx, y=y.values, mode=line_mode, name=nm, connectgaps=True,
+                        text=txt(y, kind) if on else None, textposition=POS,
+                        marker=dict(color=col),
+                        line=dict(color=col, width=wid, shape=LSHAPE),
+                        **(fill_kw(col) if on else {})))
+                fig.update_yaxes(title=CHART_LABEL[metric], **axis_kw(kind))
                 if yr:
                     fig.update_yaxes(range=yr)
                 styled(fig, title)
-                chart_slot.plotly_chart(fig, use_container_width=True)
+                chart_slot.plotly_chart(fig, use_container_width=True,
+                                        config=export_config(title))
                 chart_slot.caption(f"{CHART_LABEL[metric]} ({span.lower()}), {idx[0]}–{idx[-1]}. "
                                    "Drag on the plot to zoom; double-click to autoscale. Yields "
                                    "use the NCUA FPR average-balance basis.")
@@ -2339,7 +2405,8 @@ elif page == "Chart":
                                       key=f"ct_dual_{cu_pick}_{mA}_{mB}")
             yA = pd.to_numeric(s[mA], errors="coerce") if mA in s else pd.Series(dtype=float)
             yB = pd.to_numeric(s[mB], errors="coerce") if mB in s else pd.Series(dtype=float)
-            cmap = series_colors(colors_box, [CHART_LABEL[mA], CHART_LABEL[mB]], "dualcol")
+            cmap = series_colors(colors_box, [CHART_LABEL[mA], CHART_LABEL[mB]],
+                                 "dualcol_" + palette_name)
             colA, colB = cmap[CHART_LABEL[mA]], cmap[CHART_LABEL[mB]]
             rngL = manual_range(range_box, f"{CHART_LABEL[mA]} (left)", minmax(yA), "dualL")
             rngR = manual_range(range_box, f"{CHART_LABEL[mB]} (right)", minmax(yB), "dualR")
@@ -2362,7 +2429,7 @@ elif page == "Chart":
                                      line=dict(color=colB, width=line_width, shape=LSHAPE)))
             fig.update_layout(yaxis=yL, yaxis2=yR)
             styled(fig, title)
-            chart_slot.plotly_chart(fig, use_container_width=True)
+            chart_slot.plotly_chart(fig, use_container_width=True, config=export_config(title))
             chart_slot.caption(f"{cu_name} — {CHART_LABEL[mA]} (left axis) vs {CHART_LABEL[mB]} "
                                f"(right axis), {idx[0]}–{idx[-1]} ({span.lower()}).")
         else:
@@ -2388,13 +2455,16 @@ elif page == "Chart":
                             x=idx, y=y.values, mode=line_mode, name=CHART_LABEL[k],
                             connectgaps=True, text=txt(y, chart_kind(k)), textposition=POS,
                             marker=dict(color=accent),
-                            line=dict(color=accent, width=line_width, shape=LSHAPE)))
+                            line=dict(color=accent, width=line_width, shape=LSHAPE),
+                            **fill_kw(accent)))
                         fig.update_yaxes(showgrid=gridlines, **axis_kw(chart_kind(k)))
                         fig.update_xaxes(showgrid=False)
                         fig.update_traces(textfont_size=9)
                         fig.update_layout(height=max(220, height // 2), title=CHART_LABEL[k],
                                           showlegend=False, margin=dict(l=10, r=10, t=40, b=10))
-                        grid[i % 2].plotly_chart(fig, use_container_width=True, key=f"sm_{i}_{k}")
+                        grid[i % 2].plotly_chart(fig, use_container_width=True,
+                                                 key=f"sm_{i}_{k}",
+                                                 config=export_config(f"{cu_name} {CHART_LABEL[k]}"))
 
 # ============================================================ RANKINGS
 elif page == "Rankings":
