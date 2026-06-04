@@ -1473,7 +1473,7 @@ st.sidebar.markdown("#### 📊 Call Report Explorer")
 # ---- Sidebar: navigation (grouped by workflow, icon-labeled) ----
 NAV = ["Profile", "Compare", "Chart", "Rankings", "Yields", "M&A Targets",
        "Movers", "Merger History", "Industry", "Data Health"]
-NAV_ICON = {"Profile": "👤", "Compare": "⚖️", "Chart": "📉", "Rankings": "🏆",
+NAV_ICON = {"Profile": "👤", "Compare": "⚖️", "Chart": "📊", "Rankings": "🏆",
             "Yields": "📈", "M&A Targets": "🎯", "Movers": "🚀",
             "Merger History": "🔀", "Industry": "🏛️", "Data Health": "🩺"}
 page = st.sidebar.radio("View", NAV, format_func=lambda p: f"{NAV_ICON[p]}  {p}",
