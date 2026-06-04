@@ -27,7 +27,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="NCUA Call Report Explorer", page_icon="🧭", layout="wide")
+st.set_page_config(page_title="NCUA Call Report Explorer", layout="wide")
 
 DATA_DIR = Path("data")
 SKIP_TABLES = {"Readme", "Report1"}
@@ -1468,7 +1468,7 @@ sig = tuple(sorted(all_cycles))
 health = data_health(sig)
 
 # ---- Sidebar: brand ----
-st.sidebar.markdown("#### 🧭 Call Report Explorer")
+st.sidebar.markdown("#### Call Report Explorer")
 
 # ---- Sidebar: navigation (grouped by workflow, icon-labeled) ----
 NAV = ["Profile", "Compare", "Chart", "Rankings", "Yields", "M&A Targets",
@@ -1921,7 +1921,7 @@ elif page == "Chart":
                     ["Compare credit unions on one measure",
                      "One credit union across measures"], horizontal=True)
 
-    tf1, tf2, tf3 = st.columns([1, 2, 1])
+    tf1, tf2, tf3, tf4 = st.columns([1, 2, 1, 1])
     span = tf1.radio("Period", ["Quarters", "Years"], horizontal=True, key="chart_span")
     cyc_opts = [c for c in sorted(all_cycles) if span == "Quarters" or c.endswith("-12")]
     if len(cyc_opts) >= 2:
@@ -1931,7 +1931,8 @@ elif page == "Chart":
     else:
         in_range = cyc_opts
     markers = tf3.checkbox("Markers", value=True)
-    line_mode = "lines+markers" if markers else "lines"
+    labels = tf4.checkbox("Data labels", value=False)
+    line_mode = ("lines+markers" if markers else "lines") + ("+text" if labels else "")
     idx = [_period_label(c, span) for c in in_range]
     metric_keys = [k for k, _, _ in CHART_METRICS]
     default_cu = next((c for c in ALL_LABELS if str(c) == "61790"), next(iter(ALL_LABELS), None))
@@ -1942,6 +1943,18 @@ elif page == "Chart":
         if kind == "money":
             return dict(tickprefix="$", tickformat="~s")
         return dict(tickformat=",")
+
+    def lab(kind, v):
+        if pd.isna(v):
+            return ""
+        if kind == "money":
+            return money_compact(v)
+        if kind == "int":
+            return f"{v:,.0f}"
+        return f"{v:.2f}%"
+
+    def txt(series, kind):
+        return [lab(kind, v) for v in series.values] if labels else None
 
     def minmax(series):
         v = pd.to_numeric(series, errors="coerce").dropna()
@@ -1960,6 +1973,9 @@ elif page == "Chart":
                           height=500, hovermode="x unified",
                           margin=dict(l=10, r=10, t=48, b=44),
                           legend=dict(orientation="h", yanchor="top", y=-0.14, x=0))
+        fig.update_yaxes(showgrid=False)
+        fig.update_xaxes(showgrid=False)
+        fig.update_traces(textfont_size=10)
         return fig
 
     if len(in_range) < 2:
@@ -1983,8 +1999,9 @@ elif page == "Chart":
                 y = pd.to_numeric(s[metric], errors="coerce").reindex(in_range)
                 allvals += list(y.dropna().values)
                 fig.add_trace(go.Scatter(x=idx, y=y.values, mode=line_mode,
-                                         name=ALL_LABELS[c].split(" (#")[0],
-                                         connectgaps=True))
+                                         name=ALL_LABELS[c].split(" (#")[0], connectgaps=True,
+                                         text=txt(y, chart_kind(metric)),
+                                         textposition="top center"))
             if not allvals:
                 st.info("No data for this measure over the selected range.")
             else:
@@ -2035,10 +2052,12 @@ elif page == "Chart":
             if rngR:
                 yR["range"] = rngR
             fig = go.Figure()
-            fig.add_trace(go.Scatter(x=idx, y=yA.values, mode=line_mode,
-                                     name=CHART_LABEL[mA], yaxis="y", connectgaps=True))
-            fig.add_trace(go.Scatter(x=idx, y=yB.values, mode=line_mode,
-                                     name=CHART_LABEL[mB], yaxis="y2", connectgaps=True))
+            fig.add_trace(go.Scatter(x=idx, y=yA.values, mode=line_mode, name=CHART_LABEL[mA],
+                                     yaxis="y", connectgaps=True,
+                                     text=txt(yA, chart_kind(mA)), textposition="top center"))
+            fig.add_trace(go.Scatter(x=idx, y=yB.values, mode=line_mode, name=CHART_LABEL[mB],
+                                     yaxis="y2", connectgaps=True,
+                                     text=txt(yB, chart_kind(mB)), textposition="bottom center"))
             fig.update_layout(yaxis=yL, yaxis2=yR)
             styled(fig, title)
             st.plotly_chart(fig, use_container_width=True)
@@ -2060,8 +2079,12 @@ elif page == "Chart":
                 for i, k in enumerate(sel):
                     y = pd.to_numeric(s[k], errors="coerce") if k in s else pd.Series(dtype=float)
                     fig = go.Figure(go.Scatter(x=idx, y=y.values, mode=line_mode,
-                                               name=CHART_LABEL[k], connectgaps=True))
-                    fig.update_yaxes(**axis_kw(chart_kind(k)))
+                                               name=CHART_LABEL[k], connectgaps=True,
+                                               text=txt(y, chart_kind(k)),
+                                               textposition="top center"))
+                    fig.update_yaxes(showgrid=False, **axis_kw(chart_kind(k)))
+                    fig.update_xaxes(showgrid=False)
+                    fig.update_traces(textfont_size=9)
                     fig.update_layout(height=260, title=CHART_LABEL[k], showlegend=False,
                                       margin=dict(l=10, r=10, t=40, b=10))
                     grid[i % 2].plotly_chart(fig, use_container_width=True, key=f"sm_{i}_{k}")
