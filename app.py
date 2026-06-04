@@ -1902,10 +1902,13 @@ elif page == "Rankings":
     if rank_key in ("score", "stars"):
         show_keys = ["score", "stars"] + [k for k, _ in weights]
     else:
-        show_keys = ["score", "stars", "assets", "net_worth", "roa", "efficiency",
+        show_keys = ["score", "stars", "net_worth", "roa", "efficiency",
                      "nw_ratio", "delinquency"]
-        if rank_key not in show_keys:
+        if rank_key not in show_keys and rank_key != "assets":
             show_keys.insert(2, rank_key)
+    # Always show Total Assets right after the star rating, for size context.
+    show_keys = [k for k in show_keys if k != "assets"]
+    show_keys.insert(2, "assets")
     disp = pd.DataFrame({"Credit Union": view.cu_name.values, "State": view.state.values})
     colcfg = {}
     for k in show_keys:
