@@ -1917,6 +1917,7 @@ elif page == "Compare":
 elif page == "Chart":
     import plotly.graph_objects as go
     st.subheader("Chart builder")
+    PALETTE = ["#2563eb", "#dc2626", "#059669", "#d97706", "#7c3aed", "#0891b2"]
     mode = st.radio("Chart type",
                     ["Compare credit unions on one measure",
                      "One credit union across measures"], horizontal=True)
@@ -1930,19 +1931,40 @@ elif page == "Chart":
         in_range = [c for c in cyc_opts if lo <= c <= hi]
     else:
         in_range = cyc_opts
+    idx = [_period_label(c, span) for c in in_range]
 
     o1, o2, o3, o4 = st.columns(4)
     markers = o1.checkbox("Markers", value=True)
     label_mode = o2.selectbox("Data labels", ["None", "All points", "First & last", "Last only"])
     label_pos = o3.selectbox("Label position", ["Top", "Bottom", "Right", "Left"])
     title_align = o4.selectbox("Title align", ["Left", "Center", "Right"])
+
+    with st.expander("Customize chart"):
+        cc1, cc2, cc3 = st.columns(3)
+        gridlines = cc1.checkbox("Y gridlines", value=True)
+        legend_on = cc2.checkbox("Legend", value=True)
+        direct_labels = cc3.checkbox("Label lines at end", value=False,
+                                     help="Datawrapper-style: name each line at its right "
+                                          "end and hide the legend.")
+        cd1, cd2, cd3 = st.columns(3)
+        smooth = cd1.checkbox("Smooth lines", value=False)
+        line_width = cd2.slider("Line width", 1, 6, 2)
+        height = cd3.slider("Height", 320, 760, 460, step=20)
+        subtitle = st.text_input("Subtitle", value="")
+        source = st.text_input("Source / footnote", value="Source: NCUA 5300 Call Reports")
+        ce1, ce2, ce3 = st.columns(3)
+        ev_choice = ce1.selectbox("Mark a period", ["(none)"] + idx)
+        ev_label = ce2.text_input("Marker label", value="")
+        accent = ce3.color_picker("Single-series color", value=PALETTE[0])
+        ev_x = None if ev_choice == "(none)" else ev_choice
+
     labels_on = label_mode != "None"
     line_mode = ("lines+markers" if markers else "lines") + ("+text" if labels_on else "")
+    LSHAPE = "spline" if smooth else "linear"
     POS = {"Top": "top center", "Bottom": "bottom center",
            "Right": "middle right", "Left": "middle left"}[label_pos]
     TITLE_X = {"Left": (0.0, "left"), "Center": (0.5, "center"),
                "Right": (1.0, "right")}[title_align]
-    idx = [_period_label(c, span) for c in in_range]
     metric_keys = [k for k, _, _ in CHART_METRICS]
     default_cu = next((c for c in ALL_LABELS if str(c) == "61790"), next(iter(ALL_LABELS), None))
 
@@ -1985,15 +2007,56 @@ elif page == "Chart":
         b = c2.number_input(f"{label} max", value=dflt[1], key=f"{key}_hi", format="%g")
         return [a, b] if b > a else None
 
+    def series_colors(names, key):
+        with st.expander("Series colors"):
+            cols = st.columns(min(len(names), 6) or 1)
+            return {nm: cols[i % len(cols)].color_picker(nm, value=PALETTE[i % len(PALETTE)],
+                                                         key=f"{key}_{i}")
+                    for i, nm in enumerate(names)}
+
+    def _last_valid(tr):
+        ys = tr.y
+        if ys is None:
+            return None
+        for j in range(len(ys) - 1, -1, -1):
+            v = ys[j]
+            if v is not None and not (isinstance(v, float) and v != v):
+                return tr.x[j], v
+        return None
+
     def styled(fig, title):
-        fig.update_layout(title=dict(text=title, x=TITLE_X[0], xanchor=TITLE_X[1],
-                                     font=dict(size=16)),
-                          height=500, hovermode="x unified",
-                          margin=dict(l=10, r=10, t=48, b=44),
-                          legend=dict(orientation="h", yanchor="top", y=-0.14, x=0))
-        fig.update_yaxes(showgrid=False)
+        b = 30 + (46 if (legend_on and not direct_labels) else 0) + (26 if source else 0)
+        fig.update_layout(
+            title=dict(text=title, x=TITLE_X[0], xanchor=TITLE_X[1], font=dict(size=18),
+                       subtitle=dict(text=subtitle) if subtitle else None),
+            height=height, hovermode="x unified",
+            showlegend=legend_on and not direct_labels,
+            margin=dict(l=10, r=(110 if direct_labels else 12), t=64 if subtitle else 48, b=b),
+            legend=dict(orientation="h", yanchor="top", y=-0.12, x=0))
+        fig.update_yaxes(showgrid=gridlines)
         fig.update_xaxes(showgrid=False)
         fig.update_traces(textfont_size=10)
+        if source:
+            sy = -0.26 if (legend_on and not direct_labels) else -0.12
+            fig.add_annotation(text=source, xref="paper", yref="paper", x=0, y=sy,
+                               showarrow=False, xanchor="left", yanchor="top",
+                               font=dict(size=11, color="#888"))
+        if ev_x:
+            fig.add_shape(type="line", xref="x", x0=ev_x, x1=ev_x, yref="paper", y0=0, y1=1,
+                          line=dict(color="#999", width=1, dash="dash"))
+            if ev_label:
+                fig.add_annotation(x=ev_x, xref="x", yref="paper", y=1.0, yanchor="bottom",
+                                   text=ev_label, showarrow=False, font=dict(size=11, color="#666"))
+        if direct_labels:
+            for tr in fig.data:
+                lv = _last_valid(tr)
+                if not lv:
+                    continue
+                x_, y_ = lv
+                col = tr.line.color if (tr.line and tr.line.color) else "#333"
+                fig.add_annotation(x=x_, y=y_, xref="x", yref=(tr.yaxis or "y"), text=tr.name,
+                                   showarrow=False, xanchor="left", xshift=8,
+                                   font=dict(size=11, color=col))
         return fig
 
     if len(in_range) < 2:
@@ -2008,27 +2071,32 @@ elif page == "Chart":
         if not picks:
             st.info("Choose at least one credit union.")
         else:
-            fig = go.Figure()
-            allvals = []
+            series, allvals = [], []
             for c in picks:
                 s = chart_series(c, sig)
                 if s.empty or metric not in s:
                     continue
                 y = pd.to_numeric(s[metric], errors="coerce").reindex(in_range)
                 allvals += list(y.dropna().values)
-                fig.add_trace(go.Scatter(x=idx, y=y.values, mode=line_mode,
-                                         name=ALL_LABELS[c].split(" (#")[0], connectgaps=True,
-                                         text=txt(y, chart_kind(metric)), textposition=POS))
+                series.append((ALL_LABELS[c].split(" (#")[0], y))
             if not allvals:
                 st.info("No data for this measure over the selected range.")
             else:
-                names = [t.name for t in fig.data]
+                names = [nm for nm, _ in series]
                 who = (names[0] if len(names) == 1
                        else ", ".join(names) if len(names) <= 3
                        else f"{len(names)} credit unions")
                 title = st.text_input("Chart title", value=f"{CHART_LABEL[metric]} — {who}",
                                       key="ct_cmp_" + metric + "_" + "_".join(map(str, picks)))
+                colors = series_colors(names, "cmpcol")
                 yr = manual_range("y-axis", (min(allvals), max(allvals)), "cmp_y")
+                fig = go.Figure()
+                for nm, y in series:
+                    col = colors[nm]
+                    fig.add_trace(go.Scatter(x=idx, y=y.values, mode=line_mode, name=nm,
+                                             connectgaps=True, text=txt(y, chart_kind(metric)),
+                                             textposition=POS, marker=dict(color=col),
+                                             line=dict(color=col, width=line_width, shape=LSHAPE)))
                 fig.update_yaxes(title=CHART_LABEL[metric], **axis_kw(chart_kind(metric)))
                 if yr:
                     fig.update_yaxes(range=yr)
@@ -2060,6 +2128,8 @@ elif page == "Chart":
             title = st.text_input("Chart title",
                                   value=f"{cu_name}: {CHART_LABEL[mA]} vs {CHART_LABEL[mB]}",
                                   key=f"ct_dual_{cu_pick}_{mA}_{mB}")
+            cmap = series_colors([CHART_LABEL[mA], CHART_LABEL[mB]], "dualcol")
+            colA, colB = cmap[CHART_LABEL[mA]], cmap[CHART_LABEL[mB]]
             rngL = manual_range(f"{CHART_LABEL[mA]} (left)", minmax(yA), "dualL")
             rngR = manual_range(f"{CHART_LABEL[mB]} (right)", minmax(yB), "dualR")
             yL = dict(title=CHART_LABEL[mA], **axis_kw(chart_kind(mA)))
@@ -2068,14 +2138,16 @@ elif page == "Chart":
                 yL["range"] = rngL
             if rngR:
                 yR["range"] = rngR
-            fig = go.Figure()
             posB = {"top center": "bottom center", "bottom center": "top center"}.get(POS, POS)
+            fig = go.Figure()
             fig.add_trace(go.Scatter(x=idx, y=yA.values, mode=line_mode, name=CHART_LABEL[mA],
-                                     yaxis="y", connectgaps=True,
-                                     text=txt(yA, chart_kind(mA)), textposition=POS))
+                                     yaxis="y", connectgaps=True, text=txt(yA, chart_kind(mA)),
+                                     textposition=POS, marker=dict(color=colA),
+                                     line=dict(color=colA, width=line_width, shape=LSHAPE)))
             fig.add_trace(go.Scatter(x=idx, y=yB.values, mode=line_mode, name=CHART_LABEL[mB],
-                                     yaxis="y2", connectgaps=True,
-                                     text=txt(yB, chart_kind(mB)), textposition=posB))
+                                     yaxis="y2", connectgaps=True, text=txt(yB, chart_kind(mB)),
+                                     textposition=posB, marker=dict(color=colB),
+                                     line=dict(color=colB, width=line_width, shape=LSHAPE)))
             fig.update_layout(yaxis=yL, yaxis2=yR)
             styled(fig, title)
             st.plotly_chart(fig, use_container_width=True)
@@ -2097,14 +2169,15 @@ elif page == "Chart":
                 grid = st.columns(2)
                 for i, k in enumerate(sel):
                     y = pd.to_numeric(s[k], errors="coerce") if k in s else pd.Series(dtype=float)
-                    fig = go.Figure(go.Scatter(x=idx, y=y.values, mode=line_mode,
-                                               name=CHART_LABEL[k], connectgaps=True,
-                                               text=txt(y, chart_kind(k)), textposition=POS))
-                    fig.update_yaxes(showgrid=False, **axis_kw(chart_kind(k)))
+                    fig = go.Figure(go.Scatter(
+                        x=idx, y=y.values, mode=line_mode, name=CHART_LABEL[k], connectgaps=True,
+                        text=txt(y, chart_kind(k)), textposition=POS, marker=dict(color=accent),
+                        line=dict(color=accent, width=line_width, shape=LSHAPE)))
+                    fig.update_yaxes(showgrid=gridlines, **axis_kw(chart_kind(k)))
                     fig.update_xaxes(showgrid=False)
                     fig.update_traces(textfont_size=9)
-                    fig.update_layout(height=260, title=CHART_LABEL[k], showlegend=False,
-                                      margin=dict(l=10, r=10, t=40, b=10))
+                    fig.update_layout(height=max(220, height // 2), title=CHART_LABEL[k],
+                                      showlegend=False, margin=dict(l=10, r=10, t=40, b=10))
                     grid[i % 2].plotly_chart(fig, use_container_width=True, key=f"sm_{i}_{k}")
 
 # ============================================================ RANKINGS
