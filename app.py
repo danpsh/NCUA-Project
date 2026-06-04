@@ -1407,13 +1407,23 @@ health = data_health(sig)
 st.sidebar.markdown("#### 📊 Call Report Explorer")
 
 # ---- Sidebar: navigation (grouped by workflow, icon-labeled) ----
-NAV = ["Profile", "Compare", "Rankings", "Rates", "Targets",
-       "Movers", "Mergers", "Industry", "Data quality"]
-NAV_ICON = {"Profile": "👤", "Compare": "⚖️", "Rankings": "🏆", "Rates": "📈",
-            "Targets": "🎯", "Movers": "🚀", "Mergers": "🔀", "Industry": "🏛️",
-            "Data quality": "🩺"}
+NAV = ["Profile", "Compare", "Rankings", "Yields", "M&A Targets",
+       "Movers", "Merger History", "Industry", "Data Health"]
+NAV_ICON = {"Profile": "👤", "Compare": "⚖️", "Rankings": "🏆", "Yields": "📈",
+            "M&A Targets": "🎯", "Movers": "🚀", "Merger History": "🔀", "Industry": "🏛️",
+            "Data Health": "🩺"}
 page = st.sidebar.radio("View", NAV, format_func=lambda p: f"{NAV_ICON[p]}  {p}",
                         label_visibility="collapsed")
+
+
+def pick(label, options, key, fmt=None, help=None):
+    """Tap-to-select control matching the nav's style: segmented pills where the
+    Streamlit version supports them, otherwise a radio. Persists via session_state."""
+    st.session_state.setdefault(key, options[0])
+    widget = getattr(st.sidebar, "segmented_control", st.sidebar.radio)
+    val = widget(label, options, key=key, format_func=(fmt or (lambda x: x)), help=help)
+    return val if val is not None else st.session_state.get(key) or options[0]
+
 
 # ---- Sidebar: controls (Quarter always; growth/lens only where they apply) ----
 st.sidebar.divider()
@@ -1421,23 +1431,27 @@ st.sidebar.caption("Settings")
 cycle = st.sidebar.selectbox("Quarter", all_cycles)
 
 SCORING_PAGES = {"Profile", "Compare", "Rankings"}        # show the score-lens picker
-GROWTH_PAGES = {"Profile", "Compare", "Rankings", "Targets", "Movers"}  # show growth basis
-st.session_state.setdefault("growth_label", "Year-over-year")
+GROWTH_PAGES = {"Profile", "Compare", "Rankings", "M&A Targets", "Movers"}  # show growth basis
+GROWTH_OPTS = ["Year-over-year", "Quarter-over-quarter (annualized)"]
+GROWTH_FMT = {"Year-over-year": "YoY", "Quarter-over-quarter (annualized)": "QoQ"}
+LENS_FMT = {"Momentum (growth-led)": "Momentum",
+            "Performance (earnings & health)": "Performance"}
+st.session_state.setdefault("growth_label", GROWTH_OPTS[0])
 st.session_state.setdefault("score_lens", list(SCORE_LENSES)[0])
 
 if page in GROWTH_PAGES:
-    growth_label = st.sidebar.selectbox(
-        "Growth basis", ["Year-over-year", "Quarter-over-quarter (annualized)"],
-        key="growth_label")
+    growth_label = pick("Growth basis", GROWTH_OPTS, "growth_label",
+                        fmt=lambda x: GROWTH_FMT.get(x, x))
 else:
     growth_label = st.session_state.growth_label
 basis = "YoY" if growth_label.startswith("Year") else "QoQ"
 
 if page in SCORING_PAGES:
-    lens = st.sidebar.selectbox(
-        "Score lens", list(SCORE_LENSES), key="score_lens",
-        help="Momentum weights growth heaviest (who's expanding fastest). Performance "
-             "weights earnings, capital, and asset quality (who's financially strongest).")
+    lens = pick("Score lens", list(SCORE_LENSES), "score_lens",
+                fmt=lambda x: LENS_FMT.get(x, x),
+                help="Momentum weights growth heaviest (who's expanding fastest). "
+                     "Performance weights earnings, capital, and asset quality (who's "
+                     "financially strongest).")
 else:
     lens = st.session_state.score_lens
 weights = SCORE_LENSES[lens]
@@ -1962,8 +1976,8 @@ elif page == "Movers":
         st.dataframe(ex, use_container_width=True, hide_index=True, height=460)
 
 # ============================================================ INDUSTRY
-elif page == "Mergers":
-    st.subheader("Mergers")
+elif page == "Merger History":
+    st.subheader("Merger history")
     mg = merger_table(sig)
     if mg.empty:
         st.info("No merger data yet. Run the **Ingest mergers** workflow, then reboot the app "
@@ -2061,7 +2075,7 @@ elif page == "Industry":
     st.dataframe(disp, use_container_width=True, hide_index=True, height=420)
 
 # ============================================================ RATES
-elif page == "Rates":
+elif page == "Yields":
     st.subheader("Rate & spread leaderboard")
     rt = rate_table(cycle, sig)
     if rt.empty:
@@ -2097,7 +2111,7 @@ elif page == "Rates":
                          column_config=colcfg)
 
 # ============================================================ TARGETS (M&A)
-elif page == "Targets":
+elif page == "M&A Targets":
     st.subheader("M&A target screener")
     st.caption("Ranks credit unions by acquisition-target attractiveness from four distress "
                "signals — small size, shrinking, thin capital, and weak earnings. Confirmed "
@@ -2145,8 +2159,8 @@ elif page == "Targets":
                      column_config=colcfg)
 
 # ============================================================ DATA QUALITY
-elif page == "Data quality":
-    st.subheader("Data quality")
+elif page == "Data Health":
+    st.subheader("Data health")
     cs = sorted(health, reverse=True)
     n_err = sum(1 for h in health.values() if h["status"] == "error")
     n_warn = sum(1 for h in health.values() if h["status"] == "warn")
