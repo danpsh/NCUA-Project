@@ -1224,69 +1224,6 @@ def foicu_row(cu, anchor, cycle_sig):
     return {d[0].upper(): v for d, v in zip(cur.description, rows[0])}
 
 
-def _haversine_miles(lat1, lon1, lat2, lon2):
-    """Great-circle distance in statute miles between two lat/lon points."""
-    import math
-    r = 3958.7613
-    p1, p2 = math.radians(lat1), math.radians(lat2)
-    dphi = math.radians(lat2 - lat1)
-    dlmb = math.radians(lon2 - lon1)
-    a = (math.sin(dphi / 2) ** 2
-         + math.cos(p1) * math.cos(p2) * math.sin(dlmb / 2) ** 2)
-    return 2 * r * math.asin(min(1.0, math.sqrt(a)))
-
-
-@st.cache_data(show_spinner=False)
-def cu_hq_coords(cycle_sig):
-    """HQ coordinates per credit union, from the latest FOICU record. Auto-detects
-    latitude/longitude columns if present. Returns (coords, info) where coords maps
-    CU number -> (lat, lon) and info reports the source and the location fields found."""
-    info = {"source": None, "loc_cols": [], "n": 0, "has_zip": False}
-    try:
-        cur = con.execute(
-            f"SELECT * FROM read_parquet('{glob_for('FOICU')}', hive_partitioning=true, "
-            "union_by_name=true)")
-        rows = cur.fetchall()
-    except Exception:
-        return {}, info
-    cols = {d[0].upper(): i for i, d in enumerate(cur.description)}
-
-    def find(subs, exclude=()):
-        for name, i in cols.items():
-            if any(s in name for s in subs) and not any(e in name for e in exclude):
-                return i
-        return None
-    cu_i = cols.get("CU_NUMBER")
-    cyc_i = cols.get("CYCLE")
-    lat_i = find(["LATITUDE", "LAT"], exclude=["RELAT", "PLAT", "INFLAT"])
-    lon_i = find(["LONGITUDE", "LONGI", "LNG", "LON"], exclude=["LONGEV"])
-    zip_i = find(["ZIP", "POSTAL"])
-    info["loc_cols"] = sorted(c for c in cols if any(s in c for s in
-                              ("LAT", "LON", "LNG", "ZIP", "POSTAL", "STREET",
-                               "CITY", "STATE", "ADDR", "REGION")))
-    info["has_zip"] = zip_i is not None
-    if cu_i is None:
-        return {}, info
-    latest = {}
-    for r in rows:                                          # keep newest record per CU
-        cu = str(r[cu_i])
-        cyc = str(r[cyc_i]) if cyc_i is not None else ""
-        if cu not in latest or cyc >= latest[cu][0]:
-            latest[cu] = (cyc, r)
-    coords = {}
-    if lat_i is not None and lon_i is not None:
-        info["source"] = "FOICU latitude/longitude"
-        for cu, (_, r) in latest.items():
-            try:
-                la, lo = float(r[lat_i]), float(r[lon_i])
-            except (TypeError, ValueError):
-                continue
-            if la == la and lo == lo and -90 <= la <= 90 and -180 <= lo <= 180 and (la or lo):
-                coords[cu] = (la, lo)
-    info["n"] = len(coords)
-    return coords, info
-
-
 def fpr_meta_html(cu, anchor, cycle_sig):
     row = foicu_row(cu, anchor, cycle_sig)
 
@@ -2905,6 +2842,11 @@ elif page == "Chart":
             in_range = [c for c in cyc_opts if lo <= c <= hi]
         else:
             in_range = cyc_opts
+        value_mode = st.radio(
+            "Values", ["Levels", "% change from start", "Period-over-period %"],
+            horizontal=True, key="chart_valuemode",
+            help="Plot raw levels, cumulative % change from the first period in range, or "
+                 "period-over-period % change. Applies to the line views.")
     idx = [_period_label(c, span) for c in in_range]
 
     with tab_style:
@@ -2975,6 +2917,36 @@ elif page == "Chart":
         if kind == "money":
             return dict(tickprefix="$", tickformat="~s")
         return dict(tickformat=",")
+
+    CHANGED = value_mode != "Levels"
+
+    def chg(series):
+        """Apply the chosen % view to a level series; pass through when on Levels."""
+        s = pd.to_numeric(series, errors="coerce")
+        if value_mode == "% change from start":
+            nz = s.dropna()
+            base = nz.iloc[0] if len(nz) else None
+            return (s / base - 1) * 100 if base not in (None, 0) else s * np.nan
+        if value_mode == "Period-over-period %":
+            return s.pct_change() * 100
+        return s
+
+    def vkind(metric_kind):
+        return "pct" if CHANGED else metric_kind
+
+    def vlabel(label):
+        if value_mode == "% change from start":
+            return f"{label} — % change"
+        if value_mode == "Period-over-period %":
+            return f"{label} — QoQ %"
+        return label
+
+    def data_download(df, fname, key):
+        if df is None or getattr(df, "empty", True):
+            return
+        chart_slot.download_button("⬇ Download chart data (CSV)",
+                                   df.to_csv().encode("utf-8"), file_name=fname,
+                                   mime="text/csv", key="dl_" + key)
 
     def rgba(hexc, a):
         h = hexc.lstrip("#")
@@ -3159,6 +3131,8 @@ elif page == "Chart":
                     fig.update_yaxes(showgrid=False)
                 chart_slot.plotly_chart(fig, use_container_width=True,
                                         config=export_config(title))
+                data_download(pd.DataFrame({nm: y.values for nm, y in series}, index=idx),
+                              f"{metric}_bars.csv", "bars_" + metric + "_".join(map(str, picks)))
                 chart_slot.caption(f"{CHART_LABEL[metric]} ({span.lower()}), "
                                    f"{idx[0]}–{idx[-1]}. {layout.lower().capitalize()} "
                                    f"{'bars' if horiz else 'columns'}.")
@@ -3229,7 +3203,7 @@ elif page == "Chart":
                 s = chart_series(c, sig)
                 if s.empty or metric not in s:
                     continue
-                y = pd.to_numeric(s[metric], errors="coerce").reindex(in_range)
+                y = chg(pd.to_numeric(s[metric], errors="coerce").reindex(in_range))
                 allvals += list(y.dropna().values)
                 series.append((ALL_LABELS[c].split(" (#")[0], y))
             if not allvals:
@@ -3240,21 +3214,23 @@ elif page == "Chart":
                        else ", ".join(names) if len(names) <= 3
                        else f"{len(names)} credit unions")
                 with tab_data:
-                    title = st.text_input("Chart title", value=f"{CHART_LABEL[metric]} — {who}",
+                    title = st.text_input("Chart title", value=f"{vlabel(CHART_LABEL[metric])} — {who}",
                                           key="ct_cmp_" + metric + "_" + "_".join(map(str, picks)))
                     emph = st.multiselect("Emphasize lines (others muted)", names, default=[],
                                           key="emph_" + "_".join(map(str, picks)),
                                           help="Datawrapper-style highlight: keep the chosen "
                                                "lines in colour and grey out the rest.")
                 colors = series_colors(colors_box, names, "cmpcol_" + palette_name)
-                pmed, npeer, pband = {}, 0, None
+                pmed, npeer, pband, pvals = {}, 0, None, None
                 if show_peer and in_range:
                     pband = cu_band(picks[0], in_range[-1])
                     if pband:
                         pmed, npeer = peer_median_line(metric, pband, tuple(in_range), sig)
-                        allvals += [v for v in pmed.values() if v is not None]
+                        if pmed:
+                            pvals = chg(pd.Series([pmed.get(c) for c in in_range]))
+                            allvals += [v for v in pvals.tolist() if v == v]
                 yr = manual_range(range_box, "y-axis", (min(allvals), max(allvals)), "cmp_y")
-                kind = chart_kind(metric)
+                kind = vkind(chart_kind(metric))
                 ordered = sorted(series, key=lambda t: bool(emph) and t[0] in emph)
                 fig = go.Figure()
                 for nm, y in ordered:
@@ -3267,21 +3243,26 @@ elif page == "Chart":
                         marker=dict(color=col),
                         line=dict(color=col, width=wid, shape=LSHAPE),
                         **(fill_kw(col) if on else {})))
-                if pmed:
+                if pvals is not None:
                     fig.add_trace(go.Scatter(
-                        x=idx, y=[pmed.get(c) for c in in_range], mode="lines",
+                        x=idx, y=pvals.tolist(), mode="lines",
                         name=f"Peer median · {pband} (n={npeer})", connectgaps=True,
                         line=dict(color="#6b7280", width=max(2, line_width), dash="dash"),
                         hovertemplate="Peer median: %{y}<extra></extra>"))
-                fig.update_yaxes(title=CHART_LABEL[metric], **axis_kw(kind))
+                fig.update_yaxes(title=vlabel(CHART_LABEL[metric]), **axis_kw(kind))
                 if yr:
                     fig.update_yaxes(range=yr)
                 styled(fig, title)
                 chart_slot.plotly_chart(fig, use_container_width=True,
                                         config=export_config(title))
-                chart_slot.caption(f"{CHART_LABEL[metric]} ({span.lower()}), {idx[0]}–{idx[-1]}. "
-                                   "Drag on the plot to zoom; double-click to autoscale. Yields "
-                                   "use the NCUA FPR average-balance basis.")
+                dl = pd.DataFrame({nm: y.values for nm, y in series}, index=idx)
+                if pvals is not None:
+                    dl[f"Peer median ({pband})"] = pvals.tolist()
+                data_download(dl, f"{metric}_{value_mode}.csv".replace(" ", "_"),
+                              "cmp_" + metric + "_".join(map(str, picks)))
+                chart_slot.caption(f"{vlabel(CHART_LABEL[metric])} ({span.lower()}), "
+                                   f"{idx[0]}–{idx[-1]}. Drag on the plot to zoom; double-click "
+                                   "to autoscale. Yields use the NCUA FPR average-balance basis.")
 
     elif mode == "Composition (mix)":
         cat_pal = PALETTE + ["#64748b", "#a855f7", "#14b8a6", "#f97316", "#84cc16", "#e11d48"]
@@ -3578,16 +3559,17 @@ elif page == "Chart":
                 title = st.text_input("Chart title",
                                       value=f"{cu_name}: {CHART_LABEL[mA]} vs {CHART_LABEL[mB]}",
                                       key=f"ct_dual_{cu_pick}_{mA}_{mB}")
-            yA = pd.to_numeric(s[mA], errors="coerce") if mA in s else pd.Series(dtype=float)
-            yB = pd.to_numeric(s[mB], errors="coerce") if mB in s else pd.Series(dtype=float)
+            yA = chg(pd.to_numeric(s[mA], errors="coerce")) if mA in s else pd.Series(dtype=float)
+            yB = chg(pd.to_numeric(s[mB], errors="coerce")) if mB in s else pd.Series(dtype=float)
+            kA, kB = vkind(chart_kind(mA)), vkind(chart_kind(mB))
             cmap = series_colors(colors_box, [CHART_LABEL[mA], CHART_LABEL[mB]],
                                  "dualcol_" + palette_name)
             colA, colB = cmap[CHART_LABEL[mA]], cmap[CHART_LABEL[mB]]
             rngL = manual_range(range_box, f"{CHART_LABEL[mA]} (left)", minmax(yA), "dualL")
             rngR = manual_range(range_box, f"{CHART_LABEL[mB]} (right)", minmax(yB), "dualR")
-            yL = dict(title=CHART_LABEL[mA], **axis_kw(chart_kind(mA)))
-            yR = dict(title=CHART_LABEL[mB], overlaying="y", side="right",
-                      **axis_kw(chart_kind(mB)))
+            yL = dict(title=vlabel(CHART_LABEL[mA]), **axis_kw(kA))
+            yR = dict(title=vlabel(CHART_LABEL[mB]), overlaying="y", side="right",
+                      **axis_kw(kB))
             if rngL:
                 yL["range"] = rngL
             if rngR:
@@ -3595,11 +3577,11 @@ elif page == "Chart":
             posB = {"top center": "bottom center", "bottom center": "top center"}.get(POS, POS)
             fig = go.Figure()
             fig.add_trace(go.Scatter(x=idx, y=yA.values, mode=line_mode, name=CHART_LABEL[mA],
-                                     yaxis="y", connectgaps=True, text=txt(yA, chart_kind(mA)),
+                                     yaxis="y", connectgaps=True, text=txt(yA, kA),
                                      textposition=POS, marker=dict(color=colA),
                                      line=dict(color=colA, width=line_width, shape=LSHAPE)))
             fig.add_trace(go.Scatter(x=idx, y=yB.values, mode=line_mode, name=CHART_LABEL[mB],
-                                     yaxis="y2", connectgaps=True, text=txt(yB, chart_kind(mB)),
+                                     yaxis="y2", connectgaps=True, text=txt(yB, kB),
                                      textposition=posB, marker=dict(color=colB),
                                      line=dict(color=colB, width=line_width, shape=LSHAPE)))
             fig.update_layout(yaxis=yL, yaxis2=yR)
@@ -3608,20 +3590,27 @@ elif page == "Chart":
                 pmB, _ = peer_median_line(mB, pband, tuple(in_range), sig)
                 if pmA:
                     fig.add_trace(go.Scatter(
-                        x=idx, y=[pmA.get(c) for c in in_range], mode="lines", yaxis="y",
+                        x=idx, y=chg(pd.Series([pmA.get(c) for c in in_range])).tolist(),
+                        mode="lines", yaxis="y",
                         name=f"Peer median · {CHART_LABEL[mA]}", connectgaps=True,
                         line=dict(color="#9aa1ab", width=2, dash="dash"),
                         hovertemplate="Peer median: %{y}<extra></extra>"))
                 if pmB:
                     fig.add_trace(go.Scatter(
-                        x=idx, y=[pmB.get(c) for c in in_range], mode="lines", yaxis="y2",
+                        x=idx, y=chg(pd.Series([pmB.get(c) for c in in_range])).tolist(),
+                        mode="lines", yaxis="y2",
                         name=f"Peer median · {CHART_LABEL[mB]}", connectgaps=True,
                         line=dict(color="#c2c7cf", width=2, dash="dash"),
                         hovertemplate="Peer median: %{y}<extra></extra>"))
             styled(fig, title)
             chart_slot.plotly_chart(fig, use_container_width=True, config=export_config(title))
-            chart_slot.caption(f"{cu_name} — {CHART_LABEL[mA]} (left axis) vs {CHART_LABEL[mB]} "
-                               f"(right axis), {idx[0]}–{idx[-1]} ({span.lower()}).")
+            data_download(pd.DataFrame({CHART_LABEL[mA]: yA.values, CHART_LABEL[mB]: yB.values},
+                                       index=idx),
+                          f"{cu_pick}_{mA}_{mB}_{value_mode}.csv".replace(" ", "_"),
+                          f"dual_{cu_pick}_{mA}_{mB}")
+            chart_slot.caption(f"{cu_name} — {vlabel(CHART_LABEL[mA])} (left axis) vs "
+                               f"{vlabel(CHART_LABEL[mB])} (right axis), {idx[0]}–{idx[-1]} "
+                               f"({span.lower()}).")
         else:
             with tab_data:
                 sel = st.multiselect("Measures", metric_keys,
@@ -3640,11 +3629,14 @@ elif page == "Chart":
                                "Data tab to combine two on a single chart with independent scales."
                                + (f" Dashed grey = peer median ({pband})." if pband else ""))
                     grid = st.columns(2)
+                    dl_sm = {}
                     for i, k in enumerate(sel):
-                        y = pd.to_numeric(s[k], errors="coerce") if k in s else pd.Series(dtype=float)
+                        y = chg(pd.to_numeric(s[k], errors="coerce")) if k in s else pd.Series(dtype=float)
+                        kk = vkind(chart_kind(k))
+                        dl_sm[CHART_LABEL[k]] = y.reindex(in_range).values if not y.empty else None
                         fig = go.Figure(go.Scatter(
                             x=idx, y=y.values, mode=line_mode, name=CHART_LABEL[k],
-                            connectgaps=True, text=txt(y, chart_kind(k)), textposition=POS,
+                            connectgaps=True, text=txt(y, kk), textposition=POS,
                             marker=dict(color=accent),
                             line=dict(color=accent, width=line_width, shape=LSHAPE),
                             **fill_kw(accent)))
@@ -3652,18 +3644,22 @@ elif page == "Chart":
                             pm, _ = peer_median_line(k, pband, tuple(in_range), sig)
                             if pm:
                                 fig.add_trace(go.Scatter(
-                                    x=idx, y=[pm.get(c) for c in in_range], mode="lines",
-                                    name="Peer median", connectgaps=True,
+                                    x=idx, y=chg(pd.Series([pm.get(c) for c in in_range])).tolist(),
+                                    mode="lines", name="Peer median", connectgaps=True,
                                     line=dict(color="#6b7280", width=2, dash="dash"),
                                     hovertemplate="Peer median: %{y}<extra></extra>"))
-                        fig.update_yaxes(showgrid=gridlines, **axis_kw(chart_kind(k)))
+                        fig.update_yaxes(showgrid=gridlines, **axis_kw(kk))
                         fig.update_xaxes(showgrid=False)
                         fig.update_traces(textfont_size=9)
-                        fig.update_layout(height=max(220, height // 2), title=CHART_LABEL[k],
+                        fig.update_layout(height=max(220, height // 2), title=vlabel(CHART_LABEL[k]),
                                           showlegend=False, margin=dict(l=10, r=10, t=40, b=10))
                         grid[i % 2].plotly_chart(fig, use_container_width=True,
                                                  key=f"sm_{i}_{k}",
                                                  config=export_config(f"{cu_name} {CHART_LABEL[k]}"))
+                    data_download(
+                        pd.DataFrame({c: v for c, v in dl_sm.items() if v is not None}, index=idx),
+                        f"{cu_pick}_measures_{value_mode}.csv".replace(" ", "_"),
+                        f"sm_{cu_pick}_" + "_".join(sel))
 
 # ============================================================ RANKINGS
 elif page == "Rankings":
@@ -3979,44 +3975,6 @@ elif page == "M&A Targets":
         sub = sub.assign(target=(100 * (0.25 * size + 0.25 * shrink
                                         + 0.25 * cap + 0.25 * earn)).round(0))
         v = sub.sort_values("target", ascending=False)
-
-        # ---- distance from a reference CU's HQ (if coordinates are available) ----
-        coords, geo = cu_hq_coords(sig)
-        dist_map = {}
-        ref_cu = None
-        if coords:
-            cu_opts = [c for c in v.cu if str(c) in coords]
-            if cu_opts:
-                default_ref = "61790" if "61790" in [str(c) for c in cu_opts] else cu_opts[0]
-                name_by_cu = dict(zip(v.cu.astype(str), v.cu_name))
-                rc1, rc2 = st.columns([2, 1])
-                ref_cu = rc1.selectbox(
-                    "Distance from this credit union's HQ",
-                    cu_opts, index=[str(c) for c in cu_opts].index(default_ref),
-                    format_func=lambda c: f"{name_by_cu.get(str(c), c)} (#{c})")
-                if str(ref_cu) in coords:
-                    rla, rlo = coords[str(ref_cu)]
-                    for c in v.cu:
-                        ll = coords.get(str(c))
-                        dist_map[str(c)] = (_haversine_miles(rla, rlo, ll[0], ll[1])
-                                            if ll else None)
-                    have = [d for d in dist_map.values() if d is not None]
-                    if have:
-                        rad = rc2.slider("Within (mi)", 0, int(max(have)) + 1,
-                                         int(max(have)) + 1,
-                                         help="Filter the list to targets within this many "
-                                              "miles of the selected HQ.")
-                        if rad <= int(max(have)):
-                            keep = [str(c) for c in v.cu
-                                    if dist_map.get(str(c)) is not None
-                                    and dist_map[str(c)] <= rad]
-                            v = v[v.cu.astype(str).isin(keep)]
-            st.caption(f"📍 HQ coordinates: {geo['source']} · {geo['n']:,} credit unions geocoded.")
-        else:
-            st.caption("📍 Distance unavailable — no latitude/longitude found in FOICU. "
-                       f"Location fields present: {', '.join(geo['loc_cols']) or 'none'}. "
-                       "Add a ZIP-centroid file and I can map HQ ZIPs to coordinates.")
-
         disp = pd.DataFrame({"Credit Union": v.cu_name.values, "State": v.state.values,
                              "Band": v.band.values, "Total Assets": v.assets.round(0).values,
                              "Asset Growth": v.assets_growth.values,
@@ -4024,18 +3982,12 @@ elif page == "M&A Targets":
                              "Net Worth Ratio": v.nw_ratio.values, "ROA": v.roa.values,
                              "Efficiency": v.efficiency.values,
                              "Target Score": v.target.values})
-        if dist_map and ref_cu is not None:
-            disp.insert(3, "Distance (mi)",
-                        [dist_map.get(str(c)) for c in v.cu])
         pctcols = ["Asset Growth", "Member Growth", "Net Worth Ratio", "ROA", "Efficiency"]
         colcfg = {"Total Assets": st.column_config.NumberColumn("Total Assets", format="$%,.0f"),
                   "Target Score": st.column_config.ProgressColumn(
                       "Target Score", min_value=0, max_value=100, format="%d")}
         for c2 in pctcols:
             colcfg[c2] = st.column_config.NumberColumn(c2, format="%.2f%%")
-        if "Distance (mi)" in disp.columns:
-            colcfg["Distance (mi)"] = st.column_config.NumberColumn(
-                "Distance (mi)", format="%.0f mi")
         disp.insert(0, "Rank", range(1, len(disp) + 1))
         colcfg["Rank"] = st.column_config.NumberColumn("Rank", format="%d", width="small")
         st.caption(f"All {len(v):,} candidates in {label}, {cycle} — sorted by target score "
