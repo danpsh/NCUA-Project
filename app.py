@@ -864,6 +864,21 @@ DEPOSIT_MIX = [("Share drafts (checking)", ["ACCT_902"]),
                ("Money market", ["ACCT_911"]),
                ("Share certificates (CDs)", ["ACCT_908C"]),
                ("Non-member deposits", ["ACCT_457"])]
+# Operating-expense composition — labels mirror the income statement's opex lines.
+OPEX_MIX = [("Employee compensation & benefits", ["ACCT_210"]),
+            ("Office occupancy", ["ACCT_250"]),
+            ("Office operations", ["ACCT_260"]),
+            ("Loan servicing", ["ACCT_280"]),
+            ("Professional & outside services", ["ACCT_290"]),
+            ("Educational & promotional", ["ACCT_270"]),
+            ("Travel & conference", ["ACCT_230"]),
+            ("Miscellaneous operating", ["ACCT_360"])]
+# source label -> (parts, total account, residual label) for the Composition chart.
+MIX_SOURCES = {
+    "Loan mix": (LOAN_MIX, "ACCT_025B", "Other"),
+    "Deposit mix": (DEPOSIT_MIX, "ACCT_018", "Other (incl. IRA / Keogh)"),
+    "Operating expense": (OPEX_MIX, "ACCT_671", "All other operating"),
+}
 
 
 @st.cache_data(show_spinner=False)
@@ -2132,7 +2147,10 @@ elif page == "Chart":
     with tab_data:
         mode = st.radio("Chart type",
                         ["Compare credit unions on one measure",
-                         "One credit union across measures"], horizontal=True)
+                         "One credit union across measures",
+                         "Bars & columns",
+                         "Composition (mix)",
+                         "Peer plots"], horizontal=True)
         tf1, tf2 = st.columns([1, 3])
         span = tf1.radio("Period", ["Quarters", "Years"], horizontal=True, key="chart_span")
         cyc_opts = [c for c in sorted(all_cycles) if span == "Quarters" or c.endswith("-12")]
@@ -2205,6 +2223,7 @@ elif page == "Chart":
                "Right": (1.0, "right")}[title_align]
     metric_keys = [k for k, _, _ in CHART_METRICS]
     default_cu = next((c for c in ALL_LABELS if str(c) == "61790"), next(iter(ALL_LABELS), None))
+    x_is_category = True   # False for horizontal bars (value axis on x) -> skip period markers
 
     def axis_kw(kind):
         if kind == "pct":
@@ -2286,13 +2305,13 @@ elif page == "Chart":
             fig.add_annotation(text=source, xref="paper", yref="paper", x=0, y=sy,
                                showarrow=False, xanchor="left", yanchor="top",
                                font=dict(size=11, color="#888"))
-        if ev_x:
+        if ev_x and x_is_category:
             fig.add_shape(type="line", xref="x", x0=ev_x, x1=ev_x, yref="paper", y0=0, y1=1,
                           line=dict(color="#999", width=1, dash="dash"))
             if ev_label:
                 fig.add_annotation(x=ev_x, xref="x", yref="paper", y=1.0, yanchor="bottom",
                                    text=ev_label, showarrow=False, font=dict(size=11, color="#666"))
-        if band_a != "(none)" and band_b != "(none)":
+        if x_is_category and band_a != "(none)" and band_b != "(none)":
             ia, ib = idx.index(band_a), idx.index(band_b)
             if ib < ia:
                 ia, ib = ib, ia
@@ -2304,6 +2323,8 @@ elif page == "Chart":
                                    font=dict(size=11, color="#666"))
         if direct_labels:
             for tr in fig.data:
+                if tr.type != "scatter":          # end-labels are a line feature
+                    continue
                 lv = _last_valid(tr)
                 if not lv:
                     continue
@@ -2323,6 +2344,128 @@ elif page == "Chart":
 
     if len(in_range) < 2:
         chart_slot.info("Pick a range spanning at least two periods to plot a trend.")
+
+    elif mode == "Bars & columns":
+        with tab_data:
+            bo1, bo2, bo3 = st.columns(3)
+            orient = bo1.radio("Orientation", ["Columns", "Bars"], horizontal=True,
+                               help="Columns = vertical, Bars = horizontal.")
+            bar_basis = bo2.radio("Put on the axis", ["Periods", "Credit unions"],
+                                  horizontal=True,
+                                  help="Periods = one measure over time (e.g. 2024 vs 2025 "
+                                       "vs 2026). Credit unions = rank the peer universe at "
+                                       "the quarter selected in the sidebar.")
+            layout = bo3.radio("Bar layout", ["Grouped", "Stacked"], horizontal=True,
+                               help="Stacked suits series that sum to a meaningful total; "
+                                    "grouped is the usual peer comparison.")
+        with tab_style:
+            cz1, cz2 = st.columns(2)
+            vlab = cz1.selectbox("Value labels", ["None", "Outside", "Inside"], key="bar_vlab")
+            bargap = cz2.slider("Space between bars (%)", 0, 80, 30, key="bar_gap") / 100.0
+        horiz = orient == "Bars"
+        x_is_category = not horiz
+        barmode = "stack" if layout == "Stacked" else "group"
+        tpos = None if vlab == "None" else ("inside" if vlab == "Inside" else "outside")
+
+        def bar_text(series, kind):
+            return None if vlab == "None" else [lab(kind, v) for v in series.values]
+
+        def add_bar(fig, cats, vals, name=None, color=None, text=None):
+            kw = dict(name=name, marker_color=color, text=text, textposition=tpos)
+            fig.add_trace(go.Bar(y=cats, x=vals, orientation="h", **kw) if horiz
+                          else go.Bar(x=cats, y=vals, **kw))
+
+        if bar_basis == "Periods":
+            with tab_data:
+                metric = st.selectbox("Measure", metric_keys,
+                                      format_func=lambda k: CHART_LABEL[k],
+                                      index=metric_keys.index("assets"), key="bar_metric")
+                picks = st.multiselect("Credit unions (up to 6)", list(ALL_LABELS),
+                                       default=[default_cu] if default_cu is not None else [],
+                                       max_selections=6, format_func=lambda c: ALL_LABELS[c],
+                                       key="bar_cus")
+            kind = chart_kind(metric)
+            series = []
+            for c in picks:
+                s = chart_series(c, sig)
+                if s.empty or metric not in s:
+                    continue
+                y = pd.to_numeric(s[metric], errors="coerce").reindex(in_range)
+                series.append((ALL_LABELS[c].split(" (#")[0], y))
+            if not series:
+                chart_slot.info("Choose at least one credit union with data for this measure.")
+            else:
+                names = [nm for nm, _ in series]
+                who = (", ".join(names) if len(names) <= 3 else f"{len(names)} credit unions")
+                with tab_data:
+                    title = st.text_input("Chart title",
+                                          value=f"{CHART_LABEL[metric]} — {who}",
+                                          key="bt_" + metric + "_" + "_".join(map(str, picks)))
+                colors = series_colors(colors_box, names, "barcol_" + palette_name)
+                fig = go.Figure()
+                for nm, y in series:
+                    add_bar(fig, idx, y.values, name=nm, color=colors[nm],
+                            text=bar_text(y, kind))
+                fig.update_layout(barmode=barmode, bargap=bargap)
+                vkw = dict(title=CHART_LABEL[metric], **axis_kw(kind))
+                (fig.update_xaxes if horiz else fig.update_yaxes)(**vkw)
+                styled(fig, title)
+                if horiz:                       # keep gridlines on the value (x) axis
+                    fig.update_xaxes(showgrid=gridlines)
+                    fig.update_yaxes(showgrid=False)
+                chart_slot.plotly_chart(fig, use_container_width=True,
+                                        config=export_config(title))
+                chart_slot.caption(f"{CHART_LABEL[metric]} ({span.lower()}), "
+                                   f"{idx[0]}–{idx[-1]}. {layout.lower().capitalize()} "
+                                   f"{'bars' if horiz else 'columns'}.")
+        else:                                   # rank the peer universe at one cycle
+            rank_metrics = [k for k in metric_keys if k in getattr(mt, "columns", [])]
+            with tab_data:
+                metric = st.selectbox("Measure", rank_metrics,
+                                      format_func=lambda k: CHART_LABEL[k],
+                                      index=(rank_metrics.index("assets")
+                                             if "assets" in rank_metrics else 0),
+                                      key="bar_rank_metric")
+                rc1, rc2 = st.columns(2)
+                topn = rc1.slider("Show top", 5, 40, 15, key="bar_topn")
+                lowest = rc2.radio("Order", ["Highest first", "Lowest first"],
+                                   horizontal=True, key="bar_order") == "Lowest first"
+            kind = chart_kind(metric)
+            d = mt[["cu", "cu_name", metric]].copy()
+            d[metric] = pd.to_numeric(d[metric], errors="coerce")
+            d = d.dropna(subset=[metric]).sort_values(metric, ascending=lowest).head(topn)
+            if d.empty:
+                chart_slot.info("No data for this measure at the selected quarter.")
+            else:
+                has_blu = (d.cu.astype(str) == "61790").any()
+                hi_col, base_col = PALETTE[0], ("#aab2bd" if has_blu else PALETTE[0])
+                cols = [hi_col if str(c) == "61790" else base_col for c in d.cu]
+                cats, vals = d.cu_name.tolist(), d[metric].tolist()
+                with tab_data:
+                    title = st.text_input(
+                        "Chart title",
+                        value=f"{CHART_LABEL[metric]} — top {len(d)} "
+                              f"({_period_label(cycle, 'Quarters')})",
+                        key=f"btr_{metric}_{cycle}")
+                txt_ = None if vlab == "None" else [lab(kind, v) for v in vals]
+                fig = go.Figure()
+                add_bar(fig, cats, vals, color=cols, text=txt_)
+                fig.update_layout(bargap=bargap, showlegend=False)
+                vkw = dict(title=CHART_LABEL[metric], **axis_kw(kind))
+                if horiz:
+                    fig.update_yaxes(autorange="reversed")     # rank 1 on top
+                    fig.update_xaxes(**vkw)
+                else:
+                    fig.update_yaxes(**vkw)
+                styled(fig, title)
+                if horiz:
+                    fig.update_xaxes(showgrid=gridlines)
+                    fig.update_yaxes(showgrid=False, autorange="reversed")
+                chart_slot.plotly_chart(fig, use_container_width=True,
+                                        config=export_config(title))
+                chart_slot.caption(f"{CHART_LABEL[metric]} across the peer universe at "
+                                   f"{_period_label(cycle, 'Quarters')}; BluCurrent highlighted "
+                                   "in the accent colour.")
 
     elif mode.startswith("Compare"):
         with tab_data:
@@ -2380,6 +2523,275 @@ elif page == "Chart":
                 chart_slot.caption(f"{CHART_LABEL[metric]} ({span.lower()}), {idx[0]}–{idx[-1]}. "
                                    "Drag on the plot to zoom; double-click to autoscale. Yields "
                                    "use the NCUA FPR average-balance basis.")
+
+    elif mode == "Composition (mix)":
+        cat_pal = PALETTE + ["#64748b", "#a855f7", "#14b8a6", "#f97316", "#84cc16", "#e11d48"]
+        with tab_data:
+            src = st.radio("Composition", list(MIX_SOURCES), horizontal=True)
+            cu_keys = list(ALL_LABELS)
+            comp_cu = st.selectbox("Credit union", cu_keys,
+                                   index=cu_keys.index(default_cu) if default_cu in cu_keys else 0,
+                                   format_func=lambda c: ALL_LABELS[c], key="comp_cu")
+            disp = st.radio("Display", ["Snapshot (pie / donut)", "Over time (stacked)"],
+                            horizontal=True)
+        parts, total_code, resid = MIX_SOURCES[src]
+        cu_name = ALL_LABELS[comp_cu].split(" (#")[0]
+
+        if disp.startswith("Snapshot"):
+            with tab_data:
+                period = st.selectbox("Period", in_range, index=len(in_range) - 1,
+                                      format_func=lambda c: _period_label(c, span),
+                                      key="comp_period")
+                shape = st.radio("Shape", ["Donut", "Pie"], horizontal=True)
+            v = acct_values(comp_cu, period, sig)
+            mf = mix_frame(v, parts, total_code, resid)
+            if mf.empty:
+                chart_slot.info(f"No {src.lower()} reported for {cu_name} at "
+                                f"{_period_label(period, span)}.")
+            else:
+                with tab_data:
+                    title = st.text_input("Chart title",
+                                          value=f"{cu_name} — {src.lower()} "
+                                                f"({_period_label(period, span)})",
+                                          key=f"comp_t_{src}_{comp_cu}_{period}")
+                colors = [cat_pal[i % len(cat_pal)] for i in range(len(mf))]
+                fig = go.Figure(go.Pie(
+                    labels=mf["Category"].tolist(), values=mf["Amount ($M)"].tolist(),
+                    hole=0.55 if shape == "Donut" else 0.0, sort=False,
+                    direction="clockwise", marker=dict(colors=colors),
+                    texttemplate="%{label}<br>%{percent}",
+                    hovertemplate="%{label}: $%{value:.1f}M (%{percent})<extra></extra>"))
+                fig.update_layout(
+                    title=dict(text=title, x=TITLE_X[0], xanchor=TITLE_X[1], font=dict(size=18),
+                               subtitle=dict(text=subtitle) if subtitle else None),
+                    height=height, showlegend=legend_on,
+                    legend=dict(orientation="v", x=1.02, y=0.5),
+                    margin=dict(l=10, r=10, t=64 if subtitle else 48,
+                                b=30 + (26 if source else 0)))
+                if source:
+                    fig.add_annotation(text=source, xref="paper", yref="paper", x=0, y=-0.02,
+                                       showarrow=False, xanchor="left", yanchor="top",
+                                       font=dict(size=11, color="#888"))
+                chart_slot.plotly_chart(fig, use_container_width=True,
+                                        config=export_config(title))
+                tot = v.get(total_code.upper())
+                chart_slot.caption(f"{src} for {cu_name}, {_period_label(period, span)} — "
+                                   f"foots to {money(tot)}. Slices under 0.05% fold into "
+                                   f"“{resid}”.")
+        else:
+            with tab_data:
+                comp_basis = st.radio("Show", ["Share %", "Dollars"], horizontal=True)
+                comp_orient = st.radio("Orientation", ["Columns", "Bars"], horizontal=True,
+                                       key="comp_orient")
+            horiz = comp_orient == "Bars"
+            x_is_category = not horiz
+            col_key = "Share" if comp_basis == "Share %" else "Amount ($M)"
+            per = {c: (lambda m: dict(zip(m["Category"], m[col_key])) if not m.empty else {})(
+                       mix_frame(acct_values(comp_cu, c, sig), parts, total_code, resid))
+                   for c in in_range}
+            totals = {}
+            for dmap in per.values():
+                for k, val in dmap.items():
+                    totals[k] = totals.get(k, 0.0) + (val or 0.0)
+            cats = sorted(totals, key=lambda k: (k == resid, -totals[k]))
+            if not cats:
+                chart_slot.info(f"No {src.lower()} history for {cu_name} over this range.")
+            else:
+                with tab_data:
+                    title = st.text_input("Chart title",
+                                          value=f"{cu_name} — {src.lower()} over time",
+                                          key=f"comp_ts_{src}_{comp_cu}")
+                fig = go.Figure()
+                for i, cat in enumerate(cats):
+                    yv = [per[c].get(cat) for c in in_range]
+                    col = cat_pal[i % len(cat_pal)]
+                    fig.add_trace(go.Bar(y=idx, x=yv, orientation="h", name=cat,
+                                         marker_color=col) if horiz
+                                  else go.Bar(x=idx, y=yv, name=cat, marker_color=col))
+                fig.update_layout(barmode="stack", bargap=0.25)
+                if comp_basis == "Share %":
+                    vkw = dict(title="Share of total", ticksuffix="%")
+                else:
+                    vkw = dict(title="Amount", tickprefix="$", ticksuffix="M")
+                (fig.update_xaxes if horiz else fig.update_yaxes)(**vkw)
+                styled(fig, title)
+                if horiz:
+                    fig.update_xaxes(showgrid=gridlines)
+                    fig.update_yaxes(showgrid=False)
+                chart_slot.plotly_chart(fig, use_container_width=True,
+                                        config=export_config(title))
+                chart_slot.caption(f"{src} for {cu_name}, {idx[0]}–{idx[-1]} "
+                                   f"({'share of total' if comp_basis == 'Share %' else '$ millions'}, "
+                                   "stacked).")
+
+    elif mode == "Peer plots":
+        x_is_category = False                  # cross-section: period band/marker don't apply
+        cs_metrics = [k for k in metric_keys if k in getattr(mt, "columns", [])]
+        qlabel = _period_label(cycle, "Quarters")
+        with tab_data:
+            ptype = st.radio("Plot type",
+                             ["Scatter (X vs Y)", "Dot (rank)",
+                              "Range (two periods)", "Arrow (change)"], horizontal=True)
+
+        def hl_colors(cu_series):
+            has = (cu_series.astype(str) == "61790").any()
+            base = "#aab2bd" if has else PALETTE[0]
+            return [PALETTE[0] if str(c) == "61790" else base for c in cu_series]
+
+        if ptype.startswith("Scatter"):
+            with tab_data:
+                sc1, sc2 = st.columns(2)
+                xk = sc1.selectbox("X axis", cs_metrics, format_func=lambda k: CHART_LABEL[k],
+                                   index=cs_metrics.index("assets") if "assets" in cs_metrics else 0,
+                                   key="sc_x")
+                yk = sc2.selectbox("Y axis", cs_metrics, format_func=lambda k: CHART_LABEL[k],
+                                   index=cs_metrics.index("roa") if "roa" in cs_metrics else 0,
+                                   key="sc_y")
+                sizek = st.selectbox("Size by (optional)", ["(none)"] + cs_metrics,
+                                     format_func=lambda k: "(none)" if k == "(none)"
+                                     else CHART_LABEL[k], key="sc_size")
+            need = list({xk, yk} | ({sizek} if sizek != "(none)" else set()))
+            d = mt[["cu", "cu_name"] + need].copy()
+            for c in need:
+                d[c] = pd.to_numeric(d[c], errors="coerce")
+            d = d.dropna(subset=[xk, yk])
+            if d.empty:
+                chart_slot.info("No credit unions report both measures at this quarter.")
+            else:
+                with tab_data:
+                    title = st.text_input("Chart title",
+                                          value=f"{CHART_LABEL[yk]} vs {CHART_LABEL[xk]} ({qlabel})",
+                                          key=f"sc_t_{xk}_{yk}_{cycle}")
+                if sizek != "(none)":
+                    sv = pd.to_numeric(d[sizek], errors="coerce").fillna(0).clip(lower=0)
+                    sizes = 8 + 34 * (sv / (sv.max() or 1)) ** 0.5
+                else:
+                    sizes = 9
+                txt_ = [nm if str(c) == "61790" else "" for c, nm in zip(d.cu, d.cu_name)]
+                fig = go.Figure(go.Scatter(
+                    x=d[xk], y=d[yk], mode="markers+text", text=txt_, textposition="top center",
+                    textfont=dict(size=10), customdata=d.cu_name,
+                    marker=dict(color=hl_colors(d.cu), size=sizes, opacity=0.85,
+                                line=dict(width=0.5, color="white")),
+                    hovertemplate="%{customdata}<br>" + CHART_LABEL[xk] + ": %{x}<br>"
+                                  + CHART_LABEL[yk] + ": %{y}<extra></extra>"))
+                fig.update_xaxes(title=CHART_LABEL[xk], **axis_kw(chart_kind(xk)))
+                fig.update_yaxes(title=CHART_LABEL[yk], **axis_kw(chart_kind(yk)))
+                styled(fig, title)
+                fig.update_layout(showlegend=False, hovermode="closest")
+                fig.update_xaxes(showgrid=gridlines)
+                cap = f"Each dot is a credit union at {qlabel}; BluCurrent highlighted."
+                if sizek != "(none)":
+                    cap += f" Dot size ∝ {CHART_LABEL[sizek]}."
+                chart_slot.plotly_chart(fig, use_container_width=True, config=export_config(title))
+                chart_slot.caption(cap)
+
+        elif ptype.startswith("Dot"):
+            with tab_data:
+                metric = st.selectbox("Measure", cs_metrics, format_func=lambda k: CHART_LABEL[k],
+                                      index=cs_metrics.index("roa") if "roa" in cs_metrics else 0,
+                                      key="dot_metric")
+                dc1, dc2 = st.columns(2)
+                topn = dc1.slider("Show top", 5, 40, 15, key="dot_topn")
+                lowest = dc2.radio("Order", ["Highest first", "Lowest first"],
+                                   horizontal=True, key="dot_order") == "Lowest first"
+            kind = chart_kind(metric)
+            d = mt[["cu", "cu_name", metric]].copy()
+            d[metric] = pd.to_numeric(d[metric], errors="coerce")
+            d = d.dropna(subset=[metric]).sort_values(metric, ascending=lowest).head(topn)
+            if d.empty:
+                chart_slot.info("No data for this measure at the selected quarter.")
+            else:
+                with tab_data:
+                    title = st.text_input("Chart title",
+                                          value=f"{CHART_LABEL[metric]} — top {len(d)} ({qlabel})",
+                                          key=f"dot_t_{metric}_{cycle}")
+                fig = go.Figure(go.Scatter(
+                    x=d[metric], y=d.cu_name, mode="markers",
+                    marker=dict(color=hl_colors(d.cu), size=12,
+                                line=dict(width=0.5, color="white")),
+                    hovertemplate="%{y}<br>" + CHART_LABEL[metric] + ": %{x}<extra></extra>"))
+                fig.update_xaxes(title=CHART_LABEL[metric], **axis_kw(kind))
+                styled(fig, title)
+                fig.update_layout(showlegend=False, hovermode="closest")
+                fig.update_xaxes(showgrid=gridlines)
+                fig.update_yaxes(showgrid=False, autorange="reversed")
+                chart_slot.plotly_chart(fig, use_container_width=True, config=export_config(title))
+                chart_slot.caption(f"{CHART_LABEL[metric]} across peers at {qlabel}; "
+                                   "BluCurrent highlighted.")
+
+        else:                                  # Range or Arrow — two periods, one measure
+            is_arrow = ptype.startswith("Arrow")
+            with tab_data:
+                metric = st.selectbox("Measure", cs_metrics, format_func=lambda k: CHART_LABEL[k],
+                                      index=cs_metrics.index("assets") if "assets" in cs_metrics else 0,
+                                      key="rng_metric")
+                rc1, rc2, rc3 = st.columns(3)
+                pA = rc1.selectbox("From period", in_range, index=0,
+                                   format_func=lambda c: _period_label(c, span), key="rng_a")
+                pB = rc2.selectbox("To period", in_range, index=len(in_range) - 1,
+                                   format_func=lambda c: _period_label(c, span), key="rng_b")
+                topn = rc3.slider("Show top", 5, 30, 12, key="rng_topn")
+            if pA == pB:
+                chart_slot.info("Pick two different periods.")
+            else:
+                kind = chart_kind(metric)
+                mA = metrics_table(pA)[["cu", "cu_name", metric]].rename(columns={metric: "a"})
+                mB = metrics_table(pB)[["cu", metric]].rename(columns={metric: "b"})
+                d = mA.merge(mB, on="cu", how="inner")
+                d["a"] = pd.to_numeric(d.a, errors="coerce")
+                d["b"] = pd.to_numeric(d.b, errors="coerce")
+                d = d.dropna(subset=["a", "b"])
+                d["chg"] = d.b - d.a
+                d = d.reindex(d.chg.abs().sort_values(ascending=False).index).head(topn)
+                la, lb = _period_label(pA, span), _period_label(pB, span)
+                if d.empty:
+                    chart_slot.info("No credit unions have this measure in both periods.")
+                else:
+                    with tab_data:
+                        dflt = (f"{CHART_LABEL[metric]} change, {la} → {lb}" if is_arrow
+                                else f"{CHART_LABEL[metric]}: {la} vs {lb}")
+                        title = st.text_input("Chart title", value=dflt,
+                                              key=f"rng_t_{metric}_{pA}_{pB}_{is_arrow}")
+                    UP, DN, NEU = "#059669", "#dc2626", "#9aa7b8"
+                    fig = go.Figure()
+                    for _, r in d.iterrows():
+                        hov = (f"{r.cu_name}<br>{la}: {lab(kind, r.a)} → "
+                               f"{lb}: {lab(kind, r.b)}<extra></extra>")
+                        if is_arrow:
+                            c = UP if r.chg > 0 else DN if r.chg < 0 else NEU
+                            sym = "triangle-right" if r.b >= r.a else "triangle-left"
+                            fig.add_trace(go.Scatter(
+                                x=[r.a, r.b], y=[r.cu_name, r.cu_name], mode="lines+markers",
+                                line=dict(color=c, width=2),
+                                marker=dict(color=c, size=[4, 13], symbol=["circle", sym]),
+                                showlegend=False, hovertemplate=hov))
+                        else:
+                            fig.add_trace(go.Scatter(
+                                x=[r.a, r.b], y=[r.cu_name, r.cu_name], mode="lines+markers",
+                                line=dict(color="#cbd2da", width=2),
+                                marker=dict(color=[NEU, PALETTE[0]], size=11),
+                                showlegend=False, hovertemplate=hov))
+                    # legend keys
+                    if is_arrow:
+                        for nm, c in [("Increase", UP), ("Decrease", DN)]:
+                            fig.add_trace(go.Scatter(x=[None], y=[None], mode="markers",
+                                          marker=dict(color=c, size=11, symbol="triangle-right"),
+                                          name=nm))
+                    else:
+                        for nm, c in [(la, NEU), (lb, PALETTE[0])]:
+                            fig.add_trace(go.Scatter(x=[None], y=[None], mode="markers",
+                                          marker=dict(color=c, size=11), name=nm))
+                    fig.update_xaxes(title=CHART_LABEL[metric], **axis_kw(kind))
+                    styled(fig, title)
+                    fig.update_layout(hovermode="closest")
+                    fig.update_xaxes(showgrid=gridlines)
+                    fig.update_yaxes(showgrid=False, autorange="reversed")
+                    chart_slot.plotly_chart(fig, use_container_width=True,
+                                            config=export_config(title))
+                    noun = "biggest movers" if is_arrow else "widest spreads"
+                    chart_slot.caption(f"{CHART_LABEL[metric]}, {la} → {lb} — top {len(d)} by "
+                                       f"absolute change ({noun}).")
 
     else:
         with tab_data:
