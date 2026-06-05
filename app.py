@@ -1426,6 +1426,39 @@ def chart_series(cu, cycle_sig):
     return base
 
 
+@st.cache_data(show_spinner="Computing peer median…")
+def peer_median_line(metric, band, in_range, cycle_sig):
+    """Median of `metric` across the asset band at each cycle in `in_range`.
+    Returns (dict cycle->median, peer_count). Yields come from rate_table and the
+    scorecard metrics from metrics_table — the same sources the per-CU lines use, so
+    the benchmark is computed identically to the plotted series."""
+    out, ncts = {}, []
+    is_yield = metric in ("yl", "yi", "yea", "cof", "spread")
+    for cyc in in_range:
+        try:
+            tbl = rate_table(cyc, cycle_sig) if is_yield else metrics_table(cyc)
+        except Exception:
+            continue
+        if tbl is None or tbl.empty or metric not in tbl.columns or "band" not in tbl.columns:
+            continue
+        sub = pd.to_numeric(tbl.loc[tbl["band"] == band, metric], errors="coerce").dropna()
+        if len(sub):
+            out[cyc] = float(sub.median())
+            ncts.append(len(sub))
+    return out, (max(ncts) if ncts else 0)
+
+
+@st.cache_data(show_spinner=False)
+def cu_band(cu, cycle):
+    """Asset band for one CU at (or as of) a cycle, from the metrics cross-section."""
+    try:
+        mt = metrics_table(cycle)
+        row = mt.loc[mt.cu.astype(str) == str(cu), "assets"]
+        return band_of(float(row.iloc[0])) if len(row) else None
+    except Exception:
+        return None
+
+
 @st.cache_data(show_spinner=False)
 def yield_spread(cu, cycle, cycle_sig):
     """Yield & spread for one CU at `cycle`, plus the same period one year earlier
@@ -3095,6 +3128,9 @@ elif page == "Chart":
             picks = st.multiselect("Credit unions (up to 6)", list(ALL_LABELS),
                                    default=[default_cu] if default_cu is not None else [],
                                    max_selections=6, format_func=lambda c: ALL_LABELS[c])
+            show_peer = st.checkbox("Add peer median line", value=False,
+                                    help="Dashed benchmark = median of this measure across the "
+                                         "first credit union's asset band, computed per period.")
         if not picks:
             chart_slot.info("Choose at least one credit union.")
         else:
@@ -3121,6 +3157,12 @@ elif page == "Chart":
                                           help="Datawrapper-style highlight: keep the chosen "
                                                "lines in colour and grey out the rest.")
                 colors = series_colors(colors_box, names, "cmpcol_" + palette_name)
+                pmed, npeer, pband = {}, 0, None
+                if show_peer and in_range:
+                    pband = cu_band(picks[0], in_range[-1])
+                    if pband:
+                        pmed, npeer = peer_median_line(metric, pband, tuple(in_range), sig)
+                        allvals += [v for v in pmed.values() if v is not None]
                 yr = manual_range(range_box, "y-axis", (min(allvals), max(allvals)), "cmp_y")
                 kind = chart_kind(metric)
                 ordered = sorted(series, key=lambda t: bool(emph) and t[0] in emph)
@@ -3135,6 +3177,12 @@ elif page == "Chart":
                         marker=dict(color=col),
                         line=dict(color=col, width=wid, shape=LSHAPE),
                         **(fill_kw(col) if on else {})))
+                if pmed:
+                    fig.add_trace(go.Scatter(
+                        x=idx, y=[pmed.get(c) for c in in_range], mode="lines",
+                        name=f"Peer median · {pband} (n={npeer})", connectgaps=True,
+                        line=dict(color="#6b7280", width=max(2, line_width), dash="dash"),
+                        hovertemplate="Peer median: %{y}<extra></extra>"))
                 fig.update_yaxes(title=CHART_LABEL[metric], **axis_kw(kind))
                 if yr:
                     fig.update_yaxes(range=yr)
@@ -3421,7 +3469,11 @@ elif page == "Chart":
                                    index=cu_keys.index(default_cu) if default_cu in cu_keys else 0,
                                    format_func=lambda c: ALL_LABELS[c])
             dual = st.checkbox("Overlay two measures on dual axes")
+            peer_on = st.checkbox("Add peer median line", value=False,
+                                  help="Dashed benchmark = median of each measure across this "
+                                       "credit union's asset band, per period.")
         cu_name = ALL_LABELS[cu_pick].split(" (#")[0]
+        pband = cu_band(cu_pick, in_range[-1]) if (peer_on and in_range) else None
         s = chart_series(cu_pick, sig)
         s = s.reindex(in_range) if not s.empty else s
         if s.empty:
@@ -3461,6 +3513,21 @@ elif page == "Chart":
                                      textposition=posB, marker=dict(color=colB),
                                      line=dict(color=colB, width=line_width, shape=LSHAPE)))
             fig.update_layout(yaxis=yL, yaxis2=yR)
+            if pband:
+                pmA, _ = peer_median_line(mA, pband, tuple(in_range), sig)
+                pmB, _ = peer_median_line(mB, pband, tuple(in_range), sig)
+                if pmA:
+                    fig.add_trace(go.Scatter(
+                        x=idx, y=[pmA.get(c) for c in in_range], mode="lines", yaxis="y",
+                        name=f"Peer median · {CHART_LABEL[mA]}", connectgaps=True,
+                        line=dict(color="#9aa1ab", width=2, dash="dash"),
+                        hovertemplate="Peer median: %{y}<extra></extra>"))
+                if pmB:
+                    fig.add_trace(go.Scatter(
+                        x=idx, y=[pmB.get(c) for c in in_range], mode="lines", yaxis="y2",
+                        name=f"Peer median · {CHART_LABEL[mB]}", connectgaps=True,
+                        line=dict(color="#c2c7cf", width=2, dash="dash"),
+                        hovertemplate="Peer median: %{y}<extra></extra>"))
             styled(fig, title)
             chart_slot.plotly_chart(fig, use_container_width=True, config=export_config(title))
             chart_slot.caption(f"{cu_name} — {CHART_LABEL[mA]} (left axis) vs {CHART_LABEL[mB]} "
@@ -3480,7 +3547,8 @@ elif page == "Chart":
                                 "</h4>", unsafe_allow_html=True)
                     st.caption(f"{cu_name} — each measure on its own axis, {idx[0]}–{idx[-1]} "
                                f"({span.lower()}). Tick “Overlay two measures on dual axes” in the "
-                               "Data tab to combine two on a single chart with independent scales.")
+                               "Data tab to combine two on a single chart with independent scales."
+                               + (f" Dashed grey = peer median ({pband})." if pband else ""))
                     grid = st.columns(2)
                     for i, k in enumerate(sel):
                         y = pd.to_numeric(s[k], errors="coerce") if k in s else pd.Series(dtype=float)
@@ -3490,6 +3558,14 @@ elif page == "Chart":
                             marker=dict(color=accent),
                             line=dict(color=accent, width=line_width, shape=LSHAPE),
                             **fill_kw(accent)))
+                        if pband:
+                            pm, _ = peer_median_line(k, pband, tuple(in_range), sig)
+                            if pm:
+                                fig.add_trace(go.Scatter(
+                                    x=idx, y=[pm.get(c) for c in in_range], mode="lines",
+                                    name="Peer median", connectgaps=True,
+                                    line=dict(color="#6b7280", width=2, dash="dash"),
+                                    hovertemplate="Peer median: %{y}<extra></extra>"))
                         fig.update_yaxes(showgrid=gridlines, **axis_kw(chart_kind(k)))
                         fig.update_xaxes(showgrid=False)
                         fig.update_traces(textfont_size=9)
