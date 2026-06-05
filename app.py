@@ -1403,6 +1403,9 @@ CHART_METRICS = [
 ]
 CHART_LABEL = {k: lbl for k, lbl, _ in CHART_METRICS}
 _YS_KEYS = ("yl", "yi", "yea", "cof", "spread")
+# Measures a band median is meaningful for (rates/ratios) — dollar & count measures excluded.
+RATIO_PEER_KEYS = {"roa", "roe", "nim", "efficiency", "nw_ratio", "lts", "delinquency",
+                   "nco", "yl", "yi", "yea", "cof", "spread"}
 
 
 def chart_kind(k):
@@ -2568,14 +2571,24 @@ if page == "Profile":
                         "Metrics to chart", trend_opts,
                         default=trend_opts,
                         format_func=lambda k: META[k][0])
+                    peer_tr = st.checkbox(
+                        "Add peer median (asset band)", value=False, key="prof_peer_tr",
+                        help="Adds the asset-band median line to ratio measures "
+                             "(not dollar or count measures).")
                     if tspan == "Years" and not tsd.empty:
                         tsd = tsd[[str(i).endswith("-12") for i in tsd.index]]
                     if not tsd.empty and chosen:
+                        cyc_list = tuple(str(i) for i in tsd.index)
                         grid = st.columns(2)
                         for i, key in enumerate(chosen):
                             with grid[i % 2]:
                                 st.caption(META[key][0])
-                                st.line_chart(tsd[[key]].rename(columns={key: META[key][0]}))
+                                dfc = tsd[[key]].rename(columns={key: META[key][0]})
+                                if peer_tr and key in RATIO_PEER_KEYS:
+                                    pm, _ = peer_median_line(key, row.band, cyc_list, sig)
+                                    if pm:
+                                        dfc["Peer median"] = [pm.get(str(c)) for c in tsd.index]
+                                st.line_chart(dfc)
                 else:
                     st.info("Only one quarter of data is available — trends need more history.")
 
@@ -2771,6 +2784,11 @@ elif page == "Compare":
             ov_keys = oc2.multiselect(
                 "Metrics to chart", ov_opts, default=ov_opts,
                 format_func=lambda k: META[k][0])
+            peer_ov = st.checkbox(
+                "Add peer median (asset band)", value=False, key="cmp_peer_ov",
+                help="Adds the asset-band median line to ratio measures (not dollar or "
+                     "count measures). Band is taken from the first selected credit union.")
+            ov_band = cu_band(picks[0], cycle) if (peer_ov and picks) else None
             grid = st.columns(2)
             for i, key in enumerate(ov_keys):
                 series = multi_cu_series(picks, key, ALL_LABELS, sig)
@@ -2778,7 +2796,16 @@ elif page == "Compare":
                     series = series[[str(ix).endswith("-12") for ix in series.index]]
                 if not series.empty:
                     with grid[i % 2]:
-                        st.caption(META[key][0])
+                        cap = META[key][0]
+                        if ov_band and key in RATIO_PEER_KEYS:
+                            pm, npeer = peer_median_line(
+                                key, ov_band, tuple(str(ix) for ix in series.index), sig)
+                            if pm:
+                                series = series.copy()
+                                series[f"Peer median ({ov_band})"] = [
+                                    pm.get(str(ix)) for ix in series.index]
+                                cap = f"{cap} · peer median n={npeer}"
+                        st.caption(cap)
                         st.line_chart(series)
 
 # ============================================================ CHART
