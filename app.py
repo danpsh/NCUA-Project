@@ -2822,16 +2822,34 @@ elif page == "Chart":
     }
     MUTED_COLOR = "#c9ced6"          # greyed-out lines when emphasizing a subset
 
-    chart_slot = st.container()                       # chart renders here (on top)
-    tab_data, tab_style, tab_notes = st.tabs(["Data", "Style", "Annotations & axis"])
+    CHART_TYPES = [
+        ("Compare credit unions on one measure", "📈", "Lines · compare"),
+        ("One credit union across measures", "📉", "Lines · one CU"),
+        ("Bars & columns", "📊", "Bars & columns"),
+        ("Composition (mix)", "🥧", "Composition"),
+        ("Peer plots", "⚄", "Peer plots"),
+    ]
+    if "chart_mode" not in st.session_state:
+        st.session_state.chart_mode = CHART_TYPES[0][0]
+
+    def _pick_mode(m):
+        st.session_state.chart_mode = m
+
+    rail, main = st.columns([1, 4.2], gap="medium")
+    with rail:
+        st.markdown("**Chart type**")
+        for _val, _icon, _lbl in CHART_TYPES:
+            st.button(f"{_icon}  {_lbl}", key=f"ctbtn_{_val}", use_container_width=True,
+                      type="primary" if st.session_state.chart_mode == _val else "secondary",
+                      on_click=_pick_mode, args=(_val,))
+    mode = st.session_state.chart_mode
+
+    with main:
+        chart_slot = st.container()                   # live preview on top
+        tab_data, tab_refine, tab_annot, tab_layout = st.tabs(
+            ["Data", "Refine", "Annotate", "Layout"])
 
     with tab_data:
-        mode = st.radio("Chart type",
-                        ["Compare credit unions on one measure",
-                         "One credit union across measures",
-                         "Bars & columns",
-                         "Composition (mix)",
-                         "Peer plots"], horizontal=True)
         tf1, tf2 = st.columns([1, 3])
         span = tf1.radio("Period", ["Quarters", "Years"], horizontal=True, key="chart_span")
         cyc_opts = [c for c in sorted(all_cycles) if span == "Quarters" or c.endswith("-12")]
@@ -2849,43 +2867,28 @@ elif page == "Chart":
                  "period-over-period % change. Applies to the line views.")
     idx = [_period_label(c, span) for c in in_range]
 
-    with tab_style:
-        cc1, cc2, cc3, cc4 = st.columns(4)
+    with tab_refine:
+        cc1, cc2, cc3 = st.columns(3)
         markers = cc1.checkbox("Markers", value=True)
         label_mode = cc2.selectbox("Data labels",
                                    ["None", "All points", "First & last", "Last only"])
         label_pos = cc3.selectbox("Label position", ["Top", "Bottom", "Right", "Left"])
-        title_align = cc4.selectbox("Title align", ["Left", "Center", "Right"])
-        cd1, cd2, cd3 = st.columns(3)
-        gridlines = cd1.checkbox("Y gridlines", value=True)
-        legend_on = cd2.checkbox("Legend", value=True)
-        direct_labels = cd3.checkbox("Label lines at end", value=False,
-                                     help="Datawrapper-style: name each line at its right "
-                                          "end and hide the legend.")
         ce1, ce2, ce3 = st.columns(3)
         smooth = ce1.checkbox("Smooth lines", value=False)
         line_width = ce2.slider("Line width", 1, 6, 2)
-        height = ce3.slider("Height", 320, 760, 460, step=20)
-        cf1, cf2 = st.columns([1, 1])
-        palette_name = cf1.selectbox("Color palette", list(PALETTES),
-                                     help="Sets the default colours for every line. "
-                                          "Per-series pickers below still override.")
-        area_fill = cf2.checkbox("Fill area under lines", value=False,
+        area_fill = ce3.checkbox("Fill area under lines", value=False,
                                  help="Shade a translucent area beneath each line "
                                       "(Compare and small-multiples views).")
+        palette_name = st.selectbox("Color palette", list(PALETTES),
+                                     help="Sets the default colours for every line. "
+                                          "Per-series pickers below still override.")
         PALETTE = PALETTES[palette_name]
-        cx1, cx2 = st.columns([1, 1])
-        export_fmt = cx1.selectbox("Download format", ["PNG", "SVG"],
-                                   help="Sets the camera-icon download button on the chart "
-                                        "toolbar. SVG is vector — best for decks and print.")
-        export_scale = cx2.select_slider("PNG resolution", options=[1, 2, 3], value=2,
-                                         disabled=export_fmt != "PNG",
-                                         help="1×/2×/3× pixel density for the PNG download.")
         accent = st.color_picker("Single-series color", value=PALETTE[0],
                                  key=f"accent_{palette_name}")
         colors_box = st.container()                   # per-series pickers fill this
+        range_box = st.container()                    # manual-range controls fill this
 
-    with tab_notes:
+    with tab_annot:
         subtitle = st.text_input("Subtitle", value="")
         source = st.text_input("Source / footnote", value="Source: NCUA 5300 Call Reports")
         cg1, cg2 = st.columns(2)
@@ -2898,7 +2901,24 @@ elif page == "Chart":
                                     "(e.g. a rate-hike cycle).")
         band_b = cb2.selectbox("Shade to", ["(none)"] + idx, key="band_to")
         band_label = cb3.text_input("Band label", value="", key="band_lbl")
-        range_box = st.container()                    # manual-range controls fill this
+
+    with tab_layout:
+        la1, la2, la3 = st.columns(3)
+        height = la1.slider("Height", 320, 760, 460, step=20)
+        title_align = la2.selectbox("Title align", ["Left", "Center", "Right"])
+        legend_on = la3.checkbox("Legend", value=True)
+        lb1, lb2 = st.columns(2)
+        gridlines = lb1.checkbox("Y gridlines", value=True)
+        direct_labels = lb2.checkbox("Label lines at end", value=False,
+                                     help="Datawrapper-style: name each line at its right "
+                                          "end and hide the legend.")
+        lc1, lc2 = st.columns(2)
+        export_fmt = lc1.selectbox("Download format", ["PNG", "SVG"],
+                                   help="Sets the camera-icon download button on the chart "
+                                        "toolbar. SVG is vector — best for decks and print.")
+        export_scale = lc2.select_slider("PNG resolution", options=[1, 2, 3], value=2,
+                                         disabled=export_fmt != "PNG",
+                                         help="1×/2×/3× pixel density for the PNG download.")
 
     labels_on = label_mode != "None"
     line_mode = ("lines+markers" if markers else "lines") + ("+text" if labels_on else "")
@@ -3074,7 +3094,7 @@ elif page == "Chart":
             layout = bo3.radio("Bar layout", ["Grouped", "Stacked"], horizontal=True,
                                help="Stacked suits series that sum to a meaningful total; "
                                     "grouped is the usual peer comparison.")
-        with tab_style:
+        with tab_refine:
             cz1, cz2 = st.columns(2)
             vlab = cz1.selectbox("Value labels", ["None", "Outside", "Inside"], key="bar_vlab")
             bargap = cz2.slider("Space between bars (%)", 0, 80, 30, key="bar_gap") / 100.0
