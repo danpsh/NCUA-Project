@@ -2371,6 +2371,114 @@ def find_twins(cu, cycle, cycle_sig, n=20):
     return [c for _, c in scored[:n]]
 
 
+BOARD_PACKET_CSS = """<style>
+*{box-sizing:border-box}
+body{font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1f2733;margin:0;background:#f4f5f7}
+.page{max-width:760px;margin:18px auto;background:#fff;padding:28px 32px;box-shadow:0 1px 4px rgba(0,0,0,.12)}
+h1{font-size:1.5rem;margin:0 0 2px}
+.sub{color:#6b7280;font-size:.9rem;margin-bottom:16px}
+h2{font-size:1.0rem;margin:22px 0 8px;border-bottom:2px solid #e5e7eb;padding-bottom:4px}
+.kpis{display:flex;gap:10px;flex-wrap:wrap}
+.kpi{flex:1 1 18%;min-width:110px;background:#f8fafc;border:1px solid #eceff3;border-radius:8px;padding:10px 12px}
+.kpi-l{font-size:.72rem;color:#6b7280;text-transform:uppercase;letter-spacing:.03em}
+.kpi-v{font-size:1.15rem;font-weight:600;margin-top:2px}
+.tbl{width:100%;border-collapse:collapse;font-size:.88rem}
+.tbl th{text-align:left;color:#6b7280;font-weight:600;font-size:.74rem;text-transform:uppercase;border-bottom:1px solid #e5e7eb;padding:6px 8px}
+.tbl td{padding:5px 8px;border-bottom:1px solid #f1f3f5}
+.num{text-align:right;font-variant-numeric:tabular-nums}
+.pa{color:#6b7280}
+.up{color:#2e8b57}.dn{color:#c0392b}.pos{color:#2e8b57}.neg{color:#c0392b}
+.br-start td,.br-end td{font-weight:600;background:#f8fafc}
+.muted{color:#9097a1;font-size:.85rem}
+.foot{color:#9097a1;font-size:.72rem;margin-top:22px;border-top:1px solid #eee;padding-top:8px}
+.printbtn{position:fixed;top:14px;right:14px;background:#2e5fa3;color:#fff;border:0;border-radius:6px;padding:8px 14px;font-size:.85rem;cursor:pointer}
+@media print{.printbtn{display:none}body{background:#fff}.page{box-shadow:none;margin:0;max-width:none}}
+</style>"""
+
+
+def _spark_svg(vals, w=130, h=30, color="#2e5fa3"):
+    """Tiny inline SVG sparkline from a list of numbers (NaN/None points are skipped)."""
+    pts = [v for v in vals if isinstance(v, (int, float)) and v == v]
+    if len(pts) < 2:
+        return ""
+    lo, hi = min(pts), max(pts)
+    rng = (hi - lo) or 1.0
+    n = len(vals)
+    coords = []
+    for i, v in enumerate(vals):
+        if isinstance(v, (int, float)) and v == v:
+            x = 2 + (i / (n - 1)) * (w - 4) if n > 1 else w / 2
+            y = (h - 2) - (v - lo) / rng * (h - 4)
+            coords.append((x, y))
+    if len(coords) < 2:
+        return ""
+    poly = " ".join(f"{x:.1f},{y:.1f}" for x, y in coords)
+    lx, ly = coords[-1]
+    return (f"<svg width='{w}' height='{h}' viewBox='0 0 {w} {h}'>"
+            f"<polyline fill='none' stroke='{color}' stroke-width='1.5' points='{poly}'/>"
+            f"<circle cx='{lx:.1f}' cy='{ly:.1f}' r='2.3' fill='{color}'/></svg>")
+
+
+def board_packet_html(ctx):
+    """Build a standalone, print-styled HTML board packet from a prepared context dict.
+    Pure formatting — no Streamlit calls — so it is unit-testable and the output can be
+    downloaded as a file the browser saves to PDF (Print → Save as PDF)."""
+    def esc(s):
+        return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    kpi_html = "".join(
+        f"<div class='kpi'><div class='kpi-l'>{esc(l)}</div>"
+        f"<div class='kpi-v'>{esc(v)}</div></div>" for l, v in ctx.get("kpis", []))
+    rrows = []
+    for lbl, cu_v, peer_v, better in ctx.get("ratios", []):
+        mark = ("" if better is None
+                else "<span class='up'>&#9650;</span>" if better
+                else "<span class='dn'>&#9660;</span>")
+        rrows.append(f"<tr><td>{esc(lbl)}</td><td class='num'>{esc(cu_v)} {mark}</td>"
+                     f"<td class='num pa'>{esc(peer_v)}</td></tr>")
+    ratio_html = "".join(rrows)
+    b = ctx.get("bridge")
+    if b:
+        brows = [f"<tr class='br-start'><td>{esc(b['start'][0])}</td>"
+                 f"<td class='num'>{b['start'][1]:.2f}%</td></tr>"]
+        for lbl, val in b["steps"]:
+            cls = "pos" if val >= 0 else "neg"
+            brows.append(f"<tr><td>{esc(lbl)}</td>"
+                         f"<td class='num {cls}'>{val:+.2f}</td></tr>")
+        brows.append(f"<tr class='br-end'><td>{esc(b['end'][0])}</td>"
+                     f"<td class='num'>{b['end'][1]:.2f}%</td></tr>")
+        bridge_html = ("<table class='tbl'><thead><tr><th>ROA driver vs peer avg</th>"
+                       "<th class='num'>Contribution (pp)</th></tr></thead><tbody>"
+                       + "".join(brows) + "</tbody></table>")
+    else:
+        bridge_html = "<p class='muted'>ROA bridge unavailable for this period.</p>"
+    sp_rows = []
+    for lbl, vals, _k in ctx.get("sparks", []):
+        cur = next((v for v in reversed(vals) if isinstance(v, (int, float)) and v == v), None)
+        cur_s = f"{cur:.2f}%" if cur is not None else "&mdash;"
+        sv = _spark_svg(vals)
+        sp_rows.append(f"<tr><td>{esc(lbl)}</td><td>{sv}</td>"
+                       f"<td class='num'>{cur_s}</td></tr>")
+    spark_html = ("<table class='tbl'><tbody>" + "".join(sp_rows) + "</tbody></table>"
+                  if sp_rows else "<p class='muted'>Not enough history for trend lines.</p>")
+    head = ('<!DOCTYPE html><html><head><meta charset="utf-8"><title>Board packet &mdash; '
+            + esc(ctx.get("name", "")) + "</title>" + BOARD_PACKET_CSS + "</head>")
+    body = f"""<body>
+<button class="printbtn" onclick="window.print()">Print / Save as PDF</button>
+<div class="page">
+  <h1>{esc(ctx.get('name', ''))}</h1>
+  <div class="sub">Charter #{esc(ctx.get('charter', ''))} &middot; {esc(ctx.get('state', ''))} &middot; Peer group (asset band): {esc(ctx.get('band', ''))} &middot; As of {esc(ctx.get('cycle', ''))} &middot; Generated {esc(ctx.get('generated', ''))}</div>
+  <div class="kpis">{kpi_html}</div>
+  <h2>Key ratios vs peer median</h2>
+  <table class="tbl"><thead><tr><th>Ratio</th><th class="num">This CU</th><th class="num">Peer median</th></tr></thead><tbody>{ratio_html}</tbody></table>
+  <h2>ROA bridge &mdash; drivers of the gap to {ctx.get('peer_n', 0)} peers</h2>
+  {bridge_html}
+  <h2>Trends</h2>
+  {spark_html}
+  <div class="foot">Source: NCUA 5300 Call Report. &#9650;/&#9660; = better/worse than the peer median (direction-adjusted). Ratios and the ROA bridge use the NCUA FPR average-balance basis. Informational only &mdash; not investment or audit advice.</div>
+</div></body></html>"""
+    return head + body
+
+
 def fpr_ratio_html(cu, sections, mode, anchor, cycle_sig, band, n, peer=True):
     raw = cu_statement_raw(cu, cycle_sig)
     cs = sorted(cycle_sig)
@@ -2423,9 +2531,9 @@ health = data_health(sig)
 st.sidebar.markdown("#### Call Report Explorer")
 
 # ---- Sidebar: navigation (grouped by workflow, icon-labeled) ----
-NAV = ["Profile", "FPR", "ROA Bridge", "Compare", "Chart", "Rankings", "Yields", "M&A Targets",
+NAV = ["Profile", "FPR", "ROA Bridge", "Board Packet", "Compare", "Chart", "Rankings", "Yields", "M&A Targets",
        "Movers", "Merger History", "Industry", "Data Health"]
-NAV_ICON = {"Profile": "👤", "FPR": "📄", "ROA Bridge": "🌉", "Compare": "⚖️", "Chart": "📊", "Rankings": "🏆",
+NAV_ICON = {"Profile": "👤", "FPR": "📄", "ROA Bridge": "🌉", "Board Packet": "📑", "Compare": "⚖️", "Chart": "📊", "Rankings": "🏆",
             "Yields": "📈", "M&A Targets": "🎯", "Movers": "🚀",
             "Merger History": "🔀", "Industry": "🏛️", "Data Health": "🩺"}
 page = st.sidebar.radio("View", NAV, format_func=lambda p: f"{NAV_ICON[p]}  {p}",
@@ -2994,6 +3102,64 @@ elif page == "ROA Bridge":
                            "FPR page's Peer Avg. column.")
         except Exception as exc:
             st.info(f"ROA bridge unavailable ({exc}).")
+
+# ============================================================ BOARD PACKET
+elif page == "Board Packet":
+    import datetime
+    import streamlit.components.v1 as components
+    st.subheader("Board packet — printable one-pager")
+    cu_keys = list(ALL_LABELS)
+    if not cu_keys:
+        st.info("No credit unions available for this cycle.")
+    else:
+        default_cu = next((c for c in cu_keys if str(c) == "61790"), cu_keys[0])
+        cu_pick = st.selectbox("Credit union", cu_keys,
+                               index=cu_keys.index(default_cu),
+                               format_func=lambda c: ALL_LABELS[c])
+        try:
+            row = mt[mt.cu == cu_pick].iloc[0]
+            band = row.band
+            peers = mt[mt.band == band]
+            kpis = [("Assets", money(row.assets)),
+                    ("Members", f"{row.members:,.0f}" if pd.notna(row.members) else "—"),
+                    ("Net worth ratio", fmt("nw_ratio", row.nw_ratio)),
+                    ("ROA", fmt("roa", row.roa)),
+                    ("Composite score",
+                     f"{row.score:.0f}/100" if pd.notna(row.score) else "—")]
+            ratios = []
+            for k in ["roa", "roe", "nim", "efficiency", "nw_ratio", "lts",
+                      "delinquency", "nco"]:
+                lbl, _, dirn = META[k]
+                v, med = row[k], peers[k].median()
+                better = None
+                if pd.notna(v) and pd.notna(med):
+                    better = (v >= med) if dirn != "low" else (v <= med)
+                ratios.append((lbl, fmt(k, v), fmt(k, med) if pd.notna(med) else "—",
+                               better))
+            subj = _fpr_ratio_dict(cu_statement_raw(cu_pick, sig), cycle, sig)
+            pavg, p_n = fpr_peer_avg(band, cycle, sig)
+            bridge = roa_bridge_steps(subj, pavg)
+            ts = cu_timeseries(cu_pick, sig)
+            hist = ts.sort_index().tail(8) if not ts.empty else ts
+            sparks = [(META[k][0], list(hist[k]), k)
+                      for k in ["roa", "nw_ratio", "efficiency"]
+                      if not hist.empty and k in hist.columns]
+            ctx = dict(name=ALL_LABELS[cu_pick].split(" (#")[0], charter=str(cu_pick),
+                       state=row.state, band=band, cycle=cycle,
+                       generated=datetime.date.today().isoformat(),
+                       kpis=kpis, ratios=ratios, bridge=bridge, sparks=sparks,
+                       peer_n=p_n or len(peers))
+            html = board_packet_html(ctx)
+            st.download_button("⬇  Download board packet (HTML → Print to PDF)",
+                               data=html,
+                               file_name=f"board_packet_{cu_pick}_{cycle}.html",
+                               mime="text/html")
+            st.caption("Open the downloaded file and use your browser's Print → Save as "
+                       "PDF. The on-screen Print button is hidden in the printout.")
+            st.markdown("---")
+            components.html(html, height=900, scrolling=True)
+        except Exception as exc:
+            st.info(f"Board packet unavailable ({exc}).")
 
 # ============================================================ COMPARE
 elif page == "Compare":
