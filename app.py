@@ -489,6 +489,7 @@ def metrics_table(cycle):
       SELECT o.CU_NUMBER AS cu, o.CU_NAME AS cu_name, COALESCE(o.STATE, '') AS state,
         TRY_CAST(f.ACCT_010  AS DOUBLE) AS assets,
         TRY_CAST(p.assets_pye AS DOUBLE) AS assets_pye,
+        TRY_CAST(p.loans_pye  AS DOUBLE) AS loans_pye,
         TRY_CAST(f.ACCT_025B AS DOUBLE) AS loans,
         TRY_CAST(f.ACCT_018  AS DOUBLE) AS shares,
         TRY_CAST(f.ACCT_671  AS DOUBLE) AS opex,
@@ -507,7 +508,9 @@ def metrics_table(cycle):
       JOIN read_parquet('{glob_for('FS220A')}', hive_partitioning=true, union_by_name=true) a
         ON o.CU_NUMBER=a.CU_NUMBER AND o.cycle=a.cycle
       LEFT JOIN (
-        SELECT CU_NUMBER, TRY_CAST(ACCT_010 AS DOUBLE) AS assets_pye
+        SELECT CU_NUMBER,
+               TRY_CAST(ACCT_010  AS DOUBLE) AS assets_pye,
+               TRY_CAST(ACCT_025B AS DOUBLE) AS loans_pye
         FROM read_parquet('{glob_for('FS220')}', hive_partitioning=true, union_by_name=true)
         WHERE cycle = '{pye}'
       ) p ON o.CU_NUMBER = p.CU_NUMBER
@@ -518,18 +521,38 @@ def metrics_table(cycle):
     # period-end balance when no prior year-end is available (new/renumbered charters).
     avg_assets = d.assets.where(d.assets_pye.isna() | (d.assets_pye == 0),
                                 (d.assets + d.assets_pye) / 2)
+    # FPR "Average Loans" = (current period + prior year-end) / 2, same fallback rule.
+    avg_loans = d.loans.where(d.loans_pye.isna() | (d.loans_pye == 0),
+                              (d.loans + d.loans_pye) / 2)
+    # PCA total assets (NW0010) for the Net Worth ratio denominator, matching the FPR
+    # page (997 / NW0010). NW0010 can sit on any FS220* schedule and may be absent on
+    # older data, so it is pulled defensively per schedule and falls back to total
+    # assets (010) when unavailable — leaving the prior behaviour intact in that case.
+    nw0010 = {}
+    for _tbl in [t for t in available_tables() if t.upper().startswith("FS220")]:
+        try:
+            for _cu, _v in con.execute(
+                    f"SELECT CU_NUMBER, TRY_CAST(ACCT_NW0010 AS DOUBLE) "
+                    f"FROM read_parquet('{glob_for(_tbl)}', hive_partitioning=true, "
+                    "union_by_name=true) WHERE cycle = ?", [cycle]).fetchall():
+                if _v is not None and _cu not in nw0010:
+                    nw0010[_cu] = _v
+        except Exception:
+            continue
+    nw_den = d.cu.map(nw0010)
+    nw_den = nw_den.where(nw_den.notna() & (nw_den != 0), d.assets)
 
     def ratio(num, den):
         return np.where(den.notna() & (den != 0), num / den * 100, np.nan)
 
-    d["roa"] = ratio(d.net_income * annualize, d.assets)
+    d["roa"] = ratio(d.net_income * annualize, avg_assets)   # NCUA ROAA: NI / average assets
     d["roe"] = ratio(d.net_income * annualize, d.net_worth)
     d["nim"] = ratio(nii * annualize, avg_assets)   # NCUA FPR: NII / average assets
     d["efficiency"] = ratio(d.opex, nii + d.non_int_income)
-    d["nw_ratio"] = ratio(d.net_worth, d.assets)
+    d["nw_ratio"] = ratio(d.net_worth, nw_den)      # 997 / NW0010 (FPR PCA basis); 010 fallback
     d["lts"] = ratio(d.loans, d.shares)
     d["delinquency"] = ratio(d.delinquent, d.loans)
-    d["nco"] = ratio((d.chargeoffs - d.recoveries) * annualize, d.loans)
+    d["nco"] = ratio((d.chargeoffs - d.recoveries) * annualize, avg_loans)  # over average loans
     d["band"] = d.assets.apply(band_of)
     return d
 
@@ -2200,6 +2223,154 @@ def fpr_peer_avg(band, cycle, cycle_sig):
     return {k: sum(vs) / len(vs) for k, vs in agg.items() if vs}, n_cu
 
 
+def roa_bridge_steps(subj, peer):
+    """Decompose the ROAA gap between a CU and its peer average into the standard NCUA
+    earnings drivers, each as % of average assets. Returns
+    {"start": (label, peer_roaa), "steps": [(label, contribution), ...],
+     "end": (label, subj_roaa)} with start + sum(steps) == end, or None when ROAA is
+    unavailable on either side. Cost lines (operating expense, provision) contribute
+    negatively — spending more than peers lowers ROAA. A residual "Other" line absorbs
+    gains/taxes/stabilization so the bars always foot to the reported ROAA."""
+    def g(d, k):
+        v = d.get(k) if d else None
+        return v if isinstance(v, (int, float)) and v == v else None
+    sr, pr = g(subj, "roaa"), g(peer, "roaa")
+    if sr is None or pr is None:
+        return None
+    comps = [("Net interest margin", "nim", 1),
+             ("Fee & other income", "fee_avg", 1),
+             ("Operating expense", "opex_avg", -1),
+             ("Provision expense", "prov_avg", -1)]
+    steps, explained = [], 0.0
+    for label, key, sign in comps:
+        contrib = sign * ((g(subj, key) or 0.0) - (g(peer, key) or 0.0))
+        explained += contrib
+        steps.append((label, contrib))
+    steps.append(("Other (gains, taxes)", (sr - pr) - explained))   # forces the foot
+    return {"start": ("Peer avg ROAA", pr), "steps": steps, "end": ("This CU ROAA", sr)}
+
+
+@st.cache_data(show_spinner="Aggregating the peer band…")
+def peer_mix_frame(band, cycle, src, cycle_sig):
+    """Dollar-weighted composition of an asset band for a mix source ('Loan mix' /
+    'Deposit mix'), returned as a (Category, Amount $M, Share) frame matching mix_frame,
+    plus the peer count. Component dollars are summed across the band's CUs (first
+    non-null per code per CU, mirroring acct_values), then run through mix_frame on the
+    aggregate so the categories and residual line up exactly with the single-CU view."""
+    if src not in MIX_SOURCES:
+        return pd.DataFrame(), 0
+    parts, total_code, resid = MIX_SOURCES[src]
+    mt_c = metrics_table(cycle)
+    cus = [str(c) for c, a in zip(mt_c.cu, mt_c.assets) if band_of(a) == band]
+    if not cus:
+        return pd.DataFrame(), 0
+    codes = {total_code.upper()} | {c.upper() for _, cs in parts for c in cs}
+    per = {c: {} for c in cus}
+    inlist = ",".join("'%s'" % c for c in cus)
+    for tbl in [t for t in available_tables() if t.upper().startswith("FS220")]:
+        try:
+            curx = con.execute(
+                f"SELECT * FROM read_parquet('{glob_for(tbl)}', hive_partitioning=true, "
+                f"union_by_name=true) WHERE cycle = ? "
+                f"AND CAST(CU_NUMBER AS VARCHAR) IN ({inlist})", [cycle])
+            rows = curx.fetchall()
+        except Exception:
+            continue
+        ix = {d[0].upper(): i for i, d in enumerate(curx.description)}
+        cu_i = ix.get("CU_NUMBER")
+        present = [(c, ix[c]) for c in codes if c in ix]
+        if cu_i is None or not present:
+            continue
+        for r in rows:
+            slot = per.get(str(r[cu_i]))
+            if slot is None:
+                continue
+            for c, i in present:
+                if c not in slot and r[i] is not None:
+                    try:
+                        slot[c] = float(r[i])
+                    except (TypeError, ValueError):
+                        pass
+    agg, n = {c: 0.0 for c in codes}, 0
+    tc = total_code.upper()
+    for c in cus:
+        d = per[c]
+        if d.get(tc, 0) and d[tc] > 0:
+            n += 1
+        for code, val in d.items():
+            agg[code] += val
+    return mix_frame(agg, parts, total_code, resid), n
+
+
+@st.cache_data(show_spinner="Finding statistical twins…")
+def find_twins(cu, cycle, cycle_sig, n=20):
+    """Up to n CU numbers most similar to `cu` at `cycle`, blending asset size (|log
+    ratio|), loan-mix profile (Euclidean distance between component share-vectors), and
+    region (same-state preferred). The candidate pool is pre-filtered to a 0.4x–2.5x
+    asset window so the loan-mix pull stays bounded. Lower score = more similar. Returns
+    [] when the subject or pool is unavailable; mix distance is neutral when a CU doesn't
+    report a loan book, so size/region still rank it."""
+    import math
+    mt_c = metrics_table(cycle)
+    srow = mt_c[mt_c.cu == cu]
+    if srow.empty:
+        return []
+    s_assets, s_state = srow.assets.iloc[0], srow.state.iloc[0]
+    if not (isinstance(s_assets, (int, float)) and s_assets and s_assets > 0):
+        return []
+    pool = mt_c[(mt_c.cu != cu) & mt_c.assets.between(s_assets * 0.4, s_assets * 2.5)]
+    if pool.empty:
+        return []
+    parts, total_code, resid = MIX_SOURCES["Loan mix"]
+    codes = {total_code.upper()} | {c.upper() for _, cs in parts for c in cs}
+    cand = [str(c) for c in pool.cu] + [str(cu)]
+    per = {c: {} for c in cand}
+    inlist = ",".join("'%s'" % c for c in cand)
+    for tbl in [t for t in available_tables() if t.upper().startswith("FS220")]:
+        try:
+            curx = con.execute(
+                f"SELECT * FROM read_parquet('{glob_for(tbl)}', hive_partitioning=true, "
+                f"union_by_name=true) WHERE cycle = ? "
+                f"AND CAST(CU_NUMBER AS VARCHAR) IN ({inlist})", [cycle])
+            rows = curx.fetchall()
+        except Exception:
+            continue
+        ix = {d[0].upper(): i for i, d in enumerate(curx.description)}
+        cu_i = ix.get("CU_NUMBER")
+        present = [(c, ix[c]) for c in codes if c in ix]
+        if cu_i is None or not present:
+            continue
+        for r in rows:
+            slot = per.get(str(r[cu_i]))
+            if slot is None:
+                continue
+            for c, i in present:
+                if c not in slot and r[i] is not None:
+                    try:
+                        slot[c] = float(r[i])
+                    except (TypeError, ValueError):
+                        pass
+
+    def share_vec(d):
+        tot = d.get(total_code.upper())
+        if not tot or tot <= 0:
+            return None
+        return [sum((d.get(c.upper(), 0.0) or 0.0) for c in cs) / tot for _, cs in parts]
+
+    s_vec = share_vec(per.get(str(cu), {}))
+    scored = []
+    for prow in pool.itertuples():
+        a = prow.assets
+        size_d = abs(math.log((a or 1e-9) / s_assets)) if (a and a > 0) else 3.0
+        cvec = share_vec(per.get(str(prow.cu), {}))
+        mix_d = (math.sqrt(sum((x - y) ** 2 for x, y in zip(s_vec, cvec)))
+                 if (s_vec is not None and cvec is not None) else 0.5)
+        state_pen = 0.0 if (prow.state == s_state and s_state) else 0.25
+        scored.append((1.2 * size_d + 1.0 * mix_d + state_pen, prow.cu))
+    scored.sort(key=lambda t: t[0])
+    return [c for _, c in scored[:n]]
+
+
 def fpr_ratio_html(cu, sections, mode, anchor, cycle_sig, band, n, peer=True):
     raw = cu_statement_raw(cu, cycle_sig)
     cs = sorted(cycle_sig)
@@ -2252,9 +2423,9 @@ health = data_health(sig)
 st.sidebar.markdown("#### Call Report Explorer")
 
 # ---- Sidebar: navigation (grouped by workflow, icon-labeled) ----
-NAV = ["Profile", "FPR", "Compare", "Chart", "Rankings", "Yields", "M&A Targets",
+NAV = ["Profile", "FPR", "ROA Bridge", "Compare", "Chart", "Rankings", "Yields", "M&A Targets",
        "Movers", "Merger History", "Industry", "Data Health"]
-NAV_ICON = {"Profile": "👤", "FPR": "📄", "Compare": "⚖️", "Chart": "📊", "Rankings": "🏆",
+NAV_ICON = {"Profile": "👤", "FPR": "📄", "ROA Bridge": "🌉", "Compare": "⚖️", "Chart": "📊", "Rankings": "🏆",
             "Yields": "📈", "M&A Targets": "🎯", "Movers": "🚀",
             "Merger History": "🔀", "Industry": "🏛️", "Data Health": "🩺"}
 page = st.sidebar.radio("View", NAV, format_func=lambda p: f"{NAV_ICON[p]}  {p}",
@@ -2597,7 +2768,8 @@ if page == "Profile":
                 basis_choice = st.radio(
                     "Compare against",
                     ["Similar asset size", f"Same state ({row.state})",
-                     "Same state + asset size", "All credit unions", "Custom (pick CUs)"],
+                     "Same state + asset size", "Statistical twins (auto)",
+                     "All credit unions", "Custom (pick CUs)"],
                     horizontal=True)
                 if basis_choice == "Custom (pick CUs)":
                     picks = st.multiselect("Choose peer credit unions",
@@ -2610,6 +2782,12 @@ if page == "Profile":
                     peers = mt[mt.state == row.state]
                 elif "state + asset" in basis_choice:
                     peers = mt[(mt.state == row.state) & (mt.band == row.band)]
+                elif basis_choice.startswith("Statistical twins"):
+                    n_tw = st.slider("Number of twins", 5, 40, 20, key="ntwins")
+                    tw = find_twins(cu, cycle, sig, n_tw)
+                    peers = mt[mt.cu.isin(tw + [cu])] if tw else mt.iloc[0:0]
+                    st.caption("Twins = most similar by asset size, loan-mix profile, and "
+                               "region (same state preferred).")
                 else:
                     peers = mt
                 st.caption(f"Peer group: {len(peers):,} credit unions")
@@ -2760,6 +2938,63 @@ elif page == "FPR":
                             '(current period + prior year-end ÷ 2).</div>')
                 st.markdown(note, unsafe_allow_html=True)
 
+# ============================================================ ROA BRIDGE
+elif page == "ROA Bridge":
+    st.subheader("ROA bridge — what drives the gap to peers")
+    cu_keys = list(ALL_LABELS)
+    if not cu_keys:
+        st.info("No credit unions available for this cycle.")
+    else:
+        default_cu = next((c for c in cu_keys if str(c) == "61790"), cu_keys[0])
+        cu_pick = st.selectbox("Credit union", cu_keys,
+                               index=cu_keys.index(default_cu),
+                               format_func=lambda c: ALL_LABELS[c])
+        info = mt[mt.cu == cu_pick]
+        band = info.band.iloc[0] if not info.empty else "Unknown"
+        nm = ALL_LABELS[cu_pick].split(" (#")[0]
+        st.caption(f"**{nm}** · Peer group (asset band): {band} · As of {cycle}. "
+                   "Each driver is a share of average assets; the bars walk from the "
+                   "peer-average ROAA up or down to this credit union's ROAA.")
+        try:
+            subj = _fpr_ratio_dict(cu_statement_raw(cu_pick, sig), cycle, sig)
+            peer, n_peer = fpr_peer_avg(band, cycle, sig)
+            bridge = roa_bridge_steps(subj, peer)
+            if bridge is None or n_peer == 0:
+                st.info("ROAA isn't available for this credit union or its peer "
+                        "group in this cycle.")
+            else:
+                import plotly.graph_objects as go
+                start_lbl, start_val = bridge["start"]
+                end_lbl, end_val = bridge["end"]
+                xs = [start_lbl] + [s[0] for s in bridge["steps"]] + [end_lbl]
+                ys = [start_val] + [s[1] for s in bridge["steps"]] + [end_val]
+                measures = ["absolute"] + ["relative"] * len(bridge["steps"]) + ["total"]
+                fig = go.Figure(go.Waterfall(
+                    orientation="v", measure=measures, x=xs, y=ys,
+                    text=[(f"{v:+.2f}" if m == "relative" else f"{v:.2f}")
+                          for v, m in zip(ys, measures)],
+                    textposition="outside",
+                    connector={"line": {"color": "rgb(160,160,160)"}},
+                    increasing={"marker": {"color": "#2e8b57"}},
+                    decreasing={"marker": {"color": "#c0392b"}},
+                    totals={"marker": {"color": "#34495e"}}))
+                fig.update_layout(height=460, showlegend=False,
+                                  margin=dict(t=30, b=90, l=50, r=20),
+                                  yaxis_title="% of average assets")
+                st.plotly_chart(fig, use_container_width=True)
+                gap = end_val - start_val
+                st.caption(f"ROAA gap vs {n_peer} {band} peers: {gap:+.2f} pp "
+                           f"({end_val:.2f}% vs {start_val:.2f}% peer average). "
+                           "Green drivers add to ROAA, red subtract.")
+                tbl = pd.DataFrame(
+                    [(lbl, f"{val:+.2f} pp") for lbl, val in bridge["steps"]],
+                    columns=["Driver (this CU vs peer avg)", "Contribution to ROAA gap"])
+                st.dataframe(tbl, use_container_width=True, hide_index=True)
+                st.caption("Peer comparison uses the asset-band average, matching the "
+                           "FPR page's Peer Avg. column.")
+        except Exception as exc:
+            st.info(f"ROA bridge unavailable ({exc}).")
+
 # ============================================================ COMPARE
 elif page == "Compare":
     st.subheader("Compare credit unions side by side")
@@ -2826,6 +3061,7 @@ elif page == "Chart":
         ("Compare credit unions on one measure", "📈", "Lines · compare"),
         ("One credit union across measures", "📉", "Lines · one CU"),
         ("Bars & columns", "📊", "Bars & columns"),
+        ("Composition (mix)", "🍩", "Composition"),
     ]
     _valid_modes = [v for v, _, _ in CHART_TYPES]
     if st.session_state.get("chart_mode") not in _valid_modes:
@@ -3382,6 +3618,62 @@ elif page == "Chart":
                 chart_slot.caption(f"{src} for {cu_name}, {idx[0]}–{idx[-1]} "
                                    f"({'share of total' if comp_basis == 'Share %' else '$ millions'}, "
                                    "stacked).")
+
+        # ---- Peer-band overlay: this CU's mix vs the asset-band aggregate ----
+        with tab_data:
+            show_peer_mix = st.checkbox("Compare to peer band", key="comp_peer_mix",
+                                        help="Overlay the dollar-weighted composition of "
+                                             "this CU's asset band.")
+        if show_peer_mix:
+            try:
+                ref_period = (period if disp.startswith("Snapshot")
+                              else (in_range[-1] if in_range else cycle))
+                _brow = mt[mt.cu == comp_cu]
+                band = (_brow.band.iloc[0] if not _brow.empty
+                        else band_of((acct_values(comp_cu, ref_period, sig) or {}).get("ACCT_010")))
+                cu_mf = mix_frame(acct_values(comp_cu, ref_period, sig), parts, total_code, resid)
+                pm, n_peer = peer_mix_frame(band, ref_period, src, sig)
+                if cu_mf.empty or pm.empty or n_peer == 0:
+                    chart_slot.info("Peer-band composition isn't available for this "
+                                    "selection.")
+                else:
+                    cu_share = dict(zip(cu_mf["Category"], cu_mf["Share"]))
+                    pe_share = dict(zip(pm["Category"], pm["Share"]))
+                    cats = list(dict.fromkeys(list(cu_share) + list(pe_share)))
+                    cats.sort(key=lambda k: (k == resid or k.startswith("Other"),
+                                             -cu_share.get(k, 0)))
+                    ov = go.Figure()
+                    ov.add_trace(go.Bar(name=cu_name, x=cats,
+                                        y=[cu_share.get(k, 0) for k in cats],
+                                        marker_color=PALETTE[0]))
+                    ov.add_trace(go.Bar(name=f"{band} peer band", x=cats,
+                                        y=[pe_share.get(k, 0) for k in cats],
+                                        marker_color="#c9ced6"))
+                    ov.update_layout(
+                        barmode="group", height=380,
+                        title=dict(text=f"{cu_name} vs {band} peer band — "
+                                        f"{src.lower()} ({_period_label(ref_period, span)})"),
+                        yaxis=dict(title="Share of total", ticksuffix="%"),
+                        legend=dict(orientation="h", y=1.14, x=0),
+                        margin=dict(l=10, r=10, t=70, b=90))
+                    chart_slot.plotly_chart(ov, use_container_width=True,
+                                            config=export_config("peer_mix"))
+                    gaps = pd.DataFrame({
+                        "Category": cats,
+                        cu_name: [cu_share.get(k) for k in cats],
+                        "Peer band": [pe_share.get(k) for k in cats],
+                        "Gap (pp)": [cu_share.get(k, 0) - pe_share.get(k, 0) for k in cats]})
+                    chart_slot.dataframe(
+                        gaps, use_container_width=True, hide_index=True, column_config={
+                            cu_name: st.column_config.NumberColumn(format="%.1f%%"),
+                            "Peer band": st.column_config.NumberColumn(format="%.1f%%"),
+                            "Gap (pp)": st.column_config.NumberColumn(format="%+.1f")})
+                    chart_slot.caption(
+                        f"Peer band = dollar-weighted {src.lower()} across {n_peer} credit "
+                        f"unions in the {band} asset band at "
+                        f"{_period_label(ref_period, span)}. Gap = this CU − peer band (pp).")
+            except Exception as _exc:
+                chart_slot.info(f"Peer-band overlay unavailable ({_exc}).")
 
     elif mode == "Peer plots":
         x_is_category = False                  # cross-section: period band/marker don't apply
