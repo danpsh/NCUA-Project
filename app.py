@@ -2826,10 +2826,9 @@ elif page == "Chart":
         ("Compare credit unions on one measure", "📈", "Lines · compare"),
         ("One credit union across measures", "📉", "Lines · one CU"),
         ("Bars & columns", "📊", "Bars & columns"),
-        ("Composition (mix)", "🥧", "Composition"),
-        ("Peer plots", "⚄", "Peer plots"),
     ]
-    if "chart_mode" not in st.session_state:
+    _valid_modes = [v for v, _, _ in CHART_TYPES]
+    if st.session_state.get("chart_mode") not in _valid_modes:
         st.session_state.chart_mode = CHART_TYPES[0][0]
 
     def _pick_mode(m):
