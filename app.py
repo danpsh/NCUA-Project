@@ -1058,6 +1058,160 @@ def build_statement(cu, schema, flow, mode, anchor, cycle_sig):
     return pd.DataFrame(out)
 
 
+# ---- NCUA-style Financial Summary (mirrors the FPR "Quarterly, Ending …" report) ----
+FPR_FS_CSS = ("<style>"
+              ".fprmeta{border-collapse:collapse;font-size:.78rem;margin:.1rem 0 .7rem}"
+              ".fprmeta th,.fprmeta td{border:1px solid #b9c0c9;padding:3px 9px;text-align:center}"
+              ".fprmeta th{background:#f3f5f7;font-weight:700}.fprmeta td.l{text-align:left}"
+              ".fprfs{border-collapse:collapse;font-size:.78rem;width:100%}"
+              ".fprfs th,.fprfs td{border:1px solid #cbd0d7;padding:3px 8px}"
+              ".fprfs thead th{background:#f3f5f7;text-align:center;font-weight:700;"
+              "white-space:nowrap}"
+              ".fprfs td.lbl{text-align:left;white-space:nowrap}"
+              ".fprfs td.num{text-align:right;font-variant-numeric:tabular-nums}"
+              ".fprfs td.pct{text-align:right;color:#475569;background:#fafbfc;"
+              "font-variant-numeric:tabular-nums}"
+              ".fprfs tr.sec td{background:#e9edf1;font-weight:700;letter-spacing:.02em}"
+              ".fprfs tr.tot td{font-weight:700;border-top:1.4px solid #98a2b0}"
+              ".fprtitle{font-weight:700;margin:.2rem 0 .35rem;font-size:.92rem}"
+              ".fprnote{font-size:.7rem;color:#6b7280;margin-top:.5rem;line-height:1.55}"
+              "</style>")
+
+FPR_BALANCE = [
+    ("Assets", "header", None),
+    ("Cash & Other Deposits", "sum", ["ACCT_730A", "ACCT_730B"]),
+    ("Total Loans", "code", "ACCT_025B"),
+    ("Total Investments & Other Assets", "res_assets", None),
+    ("Land & Building", "code", "ACCT_007"),
+    ("Other Fixed Assets", "code", "ACCT_008"),
+    ("NCUSIF Deposit", "code", "ACCT_794"),
+    ("Accrued Interest & Other Assets", "sum", ["ACCT_009A", "ACCT_009B", "ACCT_009C"]),
+    ("Total Assets", "code", "ACCT_010", True),
+    ("Liabilities, Shares & Equity", "header", None),
+    ("Total Shares & Deposits", "code", "ACCT_018"),
+    ("Borrowings", "code", "ACCT_860C"),
+    ("Accounts Payable & Other Liabilities", "code", "ACCT_825"),
+    ("Other Liabilities", "res_liab", None),
+    ("Net Worth (Equity)", "code", "ACCT_997"),
+    ("Total Liabilities, Shares & Equity", "code", "ACCT_014", True),
+]
+FPR_INCOME = [
+    ("Income & Expense", "header", None),
+    ("Interest Income*", "code", "ACCT_115"),
+    ("Interest Expense*", "code", "ACCT_350"),
+    ("Net Interest Income*", "nii", None),
+    ("Provision for Loan/Lease Losses (implied)*", "prov", None),
+    ("Non-Interest Income*", "code", "ACCT_117"),
+    ("Non-Interest Expense*", "code", "ACCT_671"),
+    ("Net Income (Loss)*", "code", "ACCT_661A", True),
+]
+_FPR_MON = {"03": "Mar", "06": "Jun", "09": "Sep", "12": "Dec"}
+
+
+def _fpr_collabel(cyc, mode):
+    y, m = cyc.split("-")
+    return y if mode == "Years" else f"{_FPR_MON[m]}-{y}"
+
+
+def _fpr_amt(v):
+    if v is None:
+        return ""
+    n = int(round(v))
+    return f"({abs(n):,})" if n < 0 else f"{n:,}"
+
+
+def _fpr_pct(cur, prev, mc, mp, income):
+    if cur is None or prev is None:
+        return "N/A"
+    if income:                                   # annualize YTD run-rates before comparing
+        cur, prev = cur * 12.0 / mc, prev * 12.0 / mp
+    if prev == 0:
+        return "N/A"
+    return f"{(cur - prev) / prev * 100:.1f}"
+
+
+@st.cache_data(show_spinner=False)
+def foicu_row(cu, anchor, cycle_sig):
+    """Latest FOICU record (name/address/region) for a CU at/just before the anchor cycle."""
+    try:
+        cur = con.execute(
+            f"SELECT * FROM read_parquet('{glob_for('FOICU')}', hive_partitioning=true, "
+            "union_by_name=true) WHERE CAST(CU_NUMBER AS VARCHAR) = ? AND cycle <= ? "
+            "ORDER BY cycle DESC LIMIT 1", [str(cu), anchor])
+        rows = cur.fetchall()
+    except Exception:
+        return {}
+    if not rows:
+        return {}
+    return {d[0].upper(): v for d, v in zip(cur.description, rows[0])}
+
+
+def fpr_meta_html(cu, anchor, cycle_sig):
+    row = foicu_row(cu, anchor, cycle_sig)
+
+    def f(*keys):
+        for k in keys:
+            v = row.get(k)
+            if v not in (None, "") and str(v).lower() != "nan":
+                return str(v).strip()
+        return ""
+
+    name = (ALL_LABELS.get(cu, "").split(" (#")[0]) or f("CU_NAME")
+    cells = [("Charter", str(cu)), ("Name", name),
+             ("Street", f("STREET", "ADDRESS", "STREET_ADDRESS")),
+             ("City", f("CITY")), ("State", f("STATE", "PHYSICAL_STATE")),
+             ("ZipCode", f("ZIP_CODE", "ZIPCODE", "ZIP", "PHYSICAL_ZIP")),
+             ("Region", f("REGION", "NCUA_REGION", "REGION_CODE", "RGN"))]
+    head = "".join(f"<th>{h}</th>" for h, _ in cells)
+    body = "".join(f'<td class="{"l" if h in ("Name", "Street") else ""}">{v}</td>'
+                   for h, v in cells)
+    return (f'<table class="fprmeta"><thead><tr>{head}</tr></thead>'
+            f'<tbody><tr>{body}</tr></tbody></table>')
+
+
+def fpr_summary_html(cu, mode, anchor, cycle_sig, n=5):
+    raw = cu_statement_raw(cu, cycle_sig)
+    cs = sorted(cycle_sig)
+    if mode == "Years":
+        periods = [c for c in cs if c.endswith("-12") and c <= anchor][-n:]
+    else:
+        periods = [c for c in cs if c <= anchor][-n:]
+    if not periods:
+        return None
+    cols = [_fpr_collabel(p, mode) for p in periods]
+    mons = [12 if mode == "Years" else {"03": 3, "06": 6, "09": 9, "12": 12}[p[-2:]]
+            for p in periods]
+    span_all = 2 * len(periods)
+    h1, h2 = ['<th rowspan="2">Line Item</th>'], []
+    for i, c in enumerate(cols):
+        if i == 0:
+            h1.append(f"<th>{c}</th>"); h2.append("<th>Amount</th>")
+        else:
+            h1.append(f'<th>{c}</th><th rowspan="2">%Chg</th>'); h2.append("<th>Amount</th>")
+    thead = f"<thead><tr>{''.join(h1)}</tr><tr>{''.join(h2)}</tr></thead>"
+
+    def rows_for(schema, income):
+        out = []
+        for row in schema:
+            label, kind, arg = row[0], row[1], row[2]
+            if kind == "header":
+                out.append(f'<tr class="sec"><td colspan="{span_all}">{label.upper()}:</td></tr>')
+                continue
+            is_tot = len(row) > 3 and row[3]
+            vals = [_line_value(kind, arg, _stmt_getter(raw, p, False, mode)) for p in periods]
+            cells = [f'<td class="lbl">{label}</td>']
+            for i, v in enumerate(vals):
+                cells.append(f'<td class="num">{_fpr_amt(v)}</td>')
+                if i > 0:
+                    cells.append('<td class="pct">'
+                                 f'{_fpr_pct(v, vals[i-1], mons[i], mons[i-1], income)}</td>')
+            out.append(f'<tr class="{"tot" if is_tot else ""}">{"".join(cells)}</tr>')
+        return out
+
+    body = rows_for(FPR_BALANCE, False) + rows_for(FPR_INCOME, True)
+    return f'<table class="fprfs">{thead}<tbody>{"".join(body)}</tbody></table>'
+
+
 # ---- Yield & spread decomposition ----------------------------------------
 # Splits the net interest margin into its drivers: what the credit union earns on
 # loans vs. investments, and what it pays for funding. Average balances follow the
@@ -2068,14 +2222,28 @@ elif page == "FPR":
         raw = cu_statement_raw(cu_pick, sig)
 
         if view == "Financial Summary":
-            st.markdown("##### Statement of Financial Condition")
-            bs = build_statement(cu_pick, BALANCE_SHEET, False, pmode, cycle, sig)
-            st.dataframe(bs, use_container_width=True, hide_index=True)
-            st.markdown("##### Statement of Income (year-to-date)")
-            inc = build_statement(cu_pick, INCOME_STATEMENT, False, pmode, cycle, sig)
-            st.dataframe(inc, use_container_width=True, hide_index=True)
-            st.caption("Dollar figures as reported on the NCUA 5300 Call Report; income is "
-                       "year-to-date as of each period.")
+            cs_pool = [c for c in sorted(sig)
+                       if c <= cycle and (pmode != "Years" or c.endswith("-12"))]
+            html = fpr_summary_html(cu_pick, pmode, cycle, sig)
+            if html is None or not cs_pool:
+                st.info("No periods available for this selection.")
+            else:
+                last_lbl = _fpr_collabel(cs_pool[-1], pmode).replace("-", " ")
+                title = f"{'Yearly' if pmode == 'Years' else 'Quarterly'}, Ending {last_lbl}"
+                st.markdown(FPR_FS_CSS, unsafe_allow_html=True)
+                st.markdown(f'<div class="fprtitle">{title}</div>', unsafe_allow_html=True)
+                st.markdown(fpr_meta_html(cu_pick, cycle, sig), unsafe_allow_html=True)
+                st.markdown(html, unsafe_allow_html=True)
+                st.markdown(
+                    '<div class="fprnote">'
+                    '* Income / expense items are year-to-date; the related %Chg ratios are '
+                    'annualized. &nbsp; %Chg is N/A when the prior period is zero.<br>'
+                    '“Total Investments &amp; Other Assets” and “Other Liabilities” are residual '
+                    'lines derived to foot to the reported totals; NCUA’s finer splits '
+                    '(investment detail, allowance for credit losses, undivided earnings vs. '
+                    'reserves) require additional verified account codes. Provision is implied '
+                    '(a net-income plug), not the separately reported figure.'
+                    '</div>', unsafe_allow_html=True)
         else:
             cs = sorted(sig)
             pool = [c for c in cs if c <= cycle and (pmode != "Years" or c.endswith("-12"))]
