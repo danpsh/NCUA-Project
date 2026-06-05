@@ -998,11 +998,13 @@ def cu_statement_raw(cu, cycle_sig):
             d = out.setdefault(str(r[cyc_i]), {})
             for name, i in acc:
                 v = r[i]
-                if v is not None:
-                    try:
-                        d[name] = float(v)
-                    except (TypeError, ValueError):
-                        pass
+                if v is None:
+                    continue
+                try:
+                    d[name] = float(v)
+                except (TypeError, ValueError):
+                    if name == "ACCT_NW0001":          # CECL adoption date (text)
+                        d[name] = str(v)
     return out
 
 
@@ -1881,7 +1883,11 @@ def _fpr_ratio_dict(raw, cyc, cycle_sig):
                   if (present("ACCT_719", "ACCT_AS0048") and nw) else None)
     nw_excl_cecl = (rt((nw or 0) - nw0004, (nw_den or 0) - nw0004)
                     if nw is not None else None)
-    cecl_date = val("ACCT_NW0001")
+    cecl_date = cur.get("ACCT_NW0001")
+    if cecl_date in (None, "", 0, 0.0):
+        cecl_date = None
+    elif isinstance(cecl_date, float) and cecl_date == int(cecl_date):
+        cecl_date = str(int(cecl_date))
 
     # Asset quality
     htm = rt(val("ACCT_801"), val("ACCT_AS0073"))
