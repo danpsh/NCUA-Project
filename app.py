@@ -1073,6 +1073,12 @@ FPR_FS_CSS = ("<style>"
               "font-variant-numeric:tabular-nums}"
               ".fprfs tr.sec td{background:#e9edf1;font-weight:700;letter-spacing:.02em}"
               ".fprfs tr.tot td{font-weight:700;border-top:1.4px solid #98a2b0}"
+              ".fprfs.fprkr td.lbl{white-space:normal}"
+              ".fprfs td.li{text-align:left;white-space:nowrap}"
+              ".fprfs td.rt{text-align:right;font-variant-numeric:tabular-nums}"
+              ".fprfs th.pa{background:#dfeee8}"
+              ".fprfs td.pa{background:#eef4f1;font-weight:600}"
+              ".fprfs sup{font-size:.62rem;color:#64748b}"
               ".fprtitle{font-weight:700;margin:.2rem 0 .35rem;font-size:.92rem}"
               ".fprnote{font-size:.7rem;color:#6b7280;margin-top:.5rem;line-height:1.55}"
               "</style>")
@@ -1718,6 +1724,18 @@ def _fpr_ratio_dict(raw, cyc, cycle_sig):
     co, rec = val("ACCT_550"), val("ACCT_551")
     nco_amt = ((co or 0) - (rec or 0)) if (co is not None or rec is not None) else None
     gross = ((ii or 0) + (noni or 0)) if (ii is not None or noni is not None) else None
+    nonop = val("ACCT_440")
+
+    def inv_base(d):
+        ta = val("ACCT_010", d)
+        if ta is None:
+            return None
+        parts = ["ACCT_025B", "ACCT_730A", "ACCT_730B", "ACCT_007", "ACCT_008",
+                 "ACCT_794", "ACCT_009A", "ACCT_009B", "ACCT_009C"]
+        return ta - sum((val(c, d) or 0) for c in parts)
+
+    ib_cur, ib_ago = inv_base(cur), (inv_base(yago) if yago else None)
+    avgL = avg("ACCT_025B")
 
     d = dict(ys)                                          # yl, yi, yea, cof, spread, nim
     d.update({
@@ -1743,6 +1761,11 @@ def _fpr_ratio_dict(raw, cyc, cycle_sig):
         "g_assets": grow("ACCT_010"), "g_loans": grow("ACCT_025B"),
         "g_shares": grow("ACCT_018"), "g_nw": grow("ACCT_997"),
         "g_members": grow("ACCT_083"),
+        "roaa_ex": (rt((ni - (nonop or 0)) * factor, aa) if (ni is not None and aa) else None),
+        "g_invest": (rt(ib_cur - ib_ago, ib_ago)
+                     if (ib_cur is not None and ib_ago not in (None, 0)) else None),
+        "delnco_loans": (rt((deln or 0) + (nco_amt or 0) * factor, avgL)
+                         if (avgL and (deln is not None or nco_amt is not None)) else None),
     })
     return d
 
@@ -1771,6 +1794,146 @@ def fpr_ratio_table(raw, periods, mode, cycle_sig):
                 rec[lb] = _fmt_ratio(dicts[p].get(key), fmt)
             rows.append(rec)
     return pd.DataFrame(rows)
+
+
+# ---- NCUA Key Ratios layout (mirrors the FPR "Key Ratios" report) ----------
+# (label, ratio-key | None for N/A, format, footnote-marker)
+FPR_KEY_SECTIONS = [
+    ("Capital Adequacy Ratios", [
+        ("Net Worth / Total Assets for Prompt Corrective Action", "nw_ratio", "pct", "6"),
+        ("Net Worth + ALLL or ACL / Total Assets + ALLL or ACL", None, "pct", ""),
+        ("Risk-Based Capital Ratio", None, "pct", ""),
+        ("GAAP Equity / Total Assets", None, "pct", ""),
+        ("Loss Coverage", None, "pct", ""),
+    ]),
+    ("Asset Quality Ratios", [
+        ("Delinquent Loans / Total Loans", "delinq_loans", "pct", ""),
+        ("Delinquent Loans / Net Worth", "delinq_nw", "pct", ""),
+        ("Rolling 12 Month Net Charge Offs / Average Loans", "nco", "pct", "2"),
+        ("Delinquent Loans + Net Charge-Offs / Average Loans", "delnco_loans", "pct", ""),
+        ("Other Non-Performing Assets / Total Assets", None, "pct", ""),
+    ]),
+    ("Management Ratios", [
+        ("Net Worth Growth", "g_nw", "pct", "1"),
+        ("Share Growth", "g_shares", "pct", "1"),
+        ("Loan Growth", "g_loans", "pct", "1"),
+        ("Asset Growth", "g_assets", "pct", "1"),
+        ("Investment Growth", "g_invest", "pct", "1"),
+        ("Membership Growth", "g_members", "pct", "1"),
+    ]),
+    ("Earnings Ratios", [
+        ("Net Income / Average Assets (ROAA)", "roaa", "pct", "1"),
+        ("Net Income - Extraordinary Gains(Losses) / Average Assets", "roaa_ex", "pct", "1"),
+        ("Non-Interest Expense / Average Assets", "opex_avg", "pct", "1"),
+        ("PLLL or Credit Loss Expense / Average Assets", "prov_avg", "pct", "1"),
+    ]),
+    ("Liquidity", [
+        ("Total Loans / Total Assets", "loans_assets", "pct", ""),
+        ("Cash + Short-Term Investments / Assets", None, "pct", "3"),
+    ]),
+    ("Sensitivity to Market Risk", [
+        ("Est. NEV Tool Post Shock Ratio", None, "pct", "4"),
+        ("Est. NEV Tool Post Shock Sensitivity", None, "pct", "4"),
+    ]),
+]
+
+
+def _fpr_ratio_cell(v, fmt):
+    if v is None or (isinstance(v, float) and v != v):
+        return "N/A"
+    if fmt == "pct":
+        return f"{v:.2f}"
+    if fmt == "money":
+        return money(v)
+    if fmt == "num":
+        return f"{v:,.0f}"
+    return str(v)
+
+
+@st.cache_data(show_spinner=False)
+def fpr_peer_avg(band, cycle, cycle_sig):
+    """Peer-group (asset-band) average of every FPR ratio at one cycle.
+    Bulk-pulls the band's accounts, then reuses _fpr_ratio_dict per CU."""
+    mt_c = metrics_table(cycle)
+    cus = [str(c) for c, a in zip(mt_c.cu, mt_c.assets) if band_of(a) == band]
+    if not cus:
+        return {}, 0
+    yr, mm = int(cycle[:4]), cycle[-2:]
+    want = {cycle, f"{yr - 1}-12", f"{yr - 1}-{mm}"} & set(cycle_sig)
+    raw_by = {c: {} for c in cus}
+    inlist = ",".join("'%s'" % c for c in cus)
+    cyclist = ",".join("'%s'" % c for c in want)
+    for tbl in ("FS220", "FS220A"):
+        try:
+            curx = con.execute(
+                f"SELECT * FROM read_parquet('{glob_for(tbl)}', hive_partitioning=true, "
+                f"union_by_name=true) WHERE cycle IN ({cyclist}) "
+                f"AND CAST(CU_NUMBER AS VARCHAR) IN ({inlist})")
+            rows = curx.fetchall()
+        except Exception:
+            continue
+        ix = {d[0].upper(): i for i, d in enumerate(curx.description)}
+        cu_i, cyc_i = ix.get("CU_NUMBER"), ix.get("CYCLE")
+        acc = [(c, i) for c, i in ix.items() if c.startswith("ACCT_")]
+        if cu_i is None or cyc_i is None:
+            continue
+        for r in rows:
+            slot = raw_by.get(str(r[cu_i]))
+            if slot is None:
+                continue
+            dd = slot.setdefault(str(r[cyc_i]), {})
+            for name, i in acc:
+                v = r[i]
+                if v is not None:
+                    try:
+                        dd[name] = float(v)
+                    except (TypeError, ValueError):
+                        pass
+    agg, n_cu = {}, 0
+    for c in cus:
+        raw = raw_by.get(c) or {}
+        if cycle not in raw:
+            continue
+        n_cu += 1
+        for k, v in _fpr_ratio_dict(raw, cycle, cycle_sig).items():
+            if isinstance(v, (int, float)) and v == v:
+                agg.setdefault(k, []).append(v)
+    return {k: sum(vs) / len(vs) for k, vs in agg.items() if vs}, n_cu
+
+
+def fpr_ratio_html(cu, sections, mode, anchor, cycle_sig, band, n, peer=True):
+    raw = cu_statement_raw(cu, cycle_sig)
+    cs = sorted(cycle_sig)
+    if mode == "Years":
+        periods = [c for c in cs if c.endswith("-12") and c <= anchor][-n:]
+    else:
+        periods = [c for c in cs if c <= anchor][-n:]
+    if not periods:
+        return None, 0
+    dicts = {p: _fpr_ratio_dict(raw, p, cycle_sig) for p in periods}
+    pavg, n_peer = (fpr_peer_avg(band, periods[-1], cycle_sig) if peer else ({}, 0))
+    cols = [_fpr_collabel(p, mode) for p in periods]
+    ncol = len(cols) + (1 if peer else 0)
+    head = "".join(f"<th>{c}</th>" for c in cols)
+    if peer:
+        head += '<th class="pa">Peer Avg.</th>'
+    thead = f'<thead><tr><th class="li">Line Item</th>{head}</tr></thead>'
+    body = []
+    for sec, items in sections:
+        body.append(f'<tr class="sec"><td colspan="{ncol + 1}">{sec.upper()}</td></tr>')
+        for it in items:
+            label, key, fmt = it[0], it[1], it[2]
+            note = it[3] if len(it) > 3 else ""
+            lbl_html = label + (f"<sup>{note}</sup>" if note else "")
+            cells = [f'<td class="lbl">{lbl_html}</td>']
+            for p in periods:
+                cells.append(f'<td class="rt">'
+                             f'{_fpr_ratio_cell(dicts[p].get(key) if key else None, fmt)}</td>')
+            if peer:
+                cells.append(f'<td class="rt pa">'
+                             f'{_fpr_ratio_cell(pavg.get(key) if key else None, fmt)}</td>')
+            body.append(f'<tr>{"".join(cells)}</tr>')
+    return f'<table class="fprfs fprkr">{thead}<tbody>{"".join(body)}</tbody></table>', n_peer
 
 
 # ---------------------------------------------------------------------------- UI
@@ -2245,23 +2408,41 @@ elif page == "FPR":
                     '(a net-income plug), not the separately reported figure.'
                     '</div>', unsafe_allow_html=True)
         else:
-            cs = sorted(sig)
-            pool = [c for c in cs if c <= cycle and (pmode != "Years" or c.endswith("-12"))]
-            if view == "Key Ratios":
-                n = 5 if pmode == "Years" else 6
-            else:
-                n = 10 if pmode == "Years" else 13
-            periods = pool[-n:][::-1]
-            if not periods:
+            cs_pool = [c for c in sorted(sig)
+                       if c <= cycle and (pmode != "Years" or c.endswith("-12"))]
+            sections = FPR_KEY_SECTIONS if view == "Key Ratios" else FPR_SECTIONS
+            n = 5 if view == "Key Ratios" else (10 if pmode == "Years" else 13)
+            html, n_peer = fpr_ratio_html(cu_pick, sections, pmode, cycle, sig, band, n,
+                                          peer=True)
+            if html is None or not cs_pool:
                 st.info("No periods available for this selection.")
             else:
-                tbl = fpr_ratio_table(raw, periods, pmode, sig)
-                st.dataframe(tbl, use_container_width=True, hide_index=True, height=680)
-                st.caption("Computed from the 5300 data on the NCUA FPR average-balance basis "
-                           "(current period + prior year-end ÷ 2); income annualized "
-                           "year-to-date, growth rates year-over-year. Line items needing "
-                           "account codes not in this dataset (e.g. FTE-based productivity, "
-                           "classified assets) are omitted.")
+                last_lbl = _fpr_collabel(cs_pool[-1], pmode).replace("-", " ")
+                title = f"{'Yearly' if pmode == 'Years' else 'Quarterly'}, Ending {last_lbl}"
+                st.markdown(FPR_FS_CSS, unsafe_allow_html=True)
+                st.markdown(f'<div class="fprtitle">{title}</div>', unsafe_allow_html=True)
+                st.markdown(fpr_meta_html(cu_pick, cycle, sig), unsafe_allow_html=True)
+                st.markdown(html, unsafe_allow_html=True)
+                peer_note = (f"Peer Avg. = mean across {n_peer} credit unions in the "
+                             f"{band} asset band as of {last_lbl}.")
+                if view == "Key Ratios":
+                    note = (
+                        '<div class="fprnote">'
+                        '1 Exam-date ratios are annualized. &nbsp; 2 Net charge-offs over the '
+                        'trailing 12 months (approximated here as the annualized year-to-date '
+                        'figure). &nbsp; 3 Relies on the maturity distribution of investments. '
+                        '&nbsp; 4 Applies to credit unions under $500M. &nbsp; 6 Net-worth ratio '
+                        'per NCUA Part 702 (Account 998).<br>' + peer_note + '<br>'
+                        'Ratios needing account codes not verified in this dataset — ALLL/ACL-'
+                        'adjusted capital, GAAP equity, risk-based capital, short-term '
+                        'investments, other non-performing assets, and the NEV tool — are shown '
+                        'N/A.</div>')
+                else:
+                    note = ('<div class="fprnote">Computed from the 5300 data on the NCUA FPR '
+                            'average-balance basis (current period + prior year-end ÷ 2); income '
+                            'annualized year-to-date, growth year-over-year.<br>' + peer_note
+                            + '</div>')
+                st.markdown(note, unsafe_allow_html=True)
 
 # ============================================================ COMPARE
 elif page == "Compare":
