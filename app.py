@@ -639,23 +639,6 @@ def rate_table(cycle, cycle_sig):
         return pd.DataFrame()
     pye = f"{int(cycle[:4]) - 1}-12"
     fp = read("FS220", pye) if pye in cycle_sig else pd.DataFrame()
-    # Bring granular investment codes (AS0007/AS0008/AS0013/AS0017) in from any other
-    # FS220 schedule so Yield on Average Investments uses the exact NCUA denominator.
-    for t in available_tables():
-        tu = t.upper()
-        if not tu.startswith("FS220") or tu in ("FS220", "FS220A"):
-            continue
-        xc = read(t, cycle)
-        if not xc.empty:
-            cols = [c for c in xc.columns if c not in a.columns and c not in f.columns]
-            if cols:
-                a = a.join(xc[cols], how="left")
-        if pye in cycle_sig and not fp.empty:
-            xp = read(t, pye)
-            if not xp.empty:
-                cols = [c for c in xp.columns if c not in fp.columns]
-                if cols:
-                    fp = fp.join(xp[cols], how="left")
     idx = f.index
 
     def col(df, code):
@@ -664,7 +647,7 @@ def rate_table(cycle, cycle_sig):
         return pd.to_numeric(df[code], errors="coerce").reindex(idx)
 
     bal = lambda code: col(f, code).fillna(col(a, code))      # balances: FS220, then FS220A
-    balp = lambda code: col(fp, code)                          # prior year-end
+    balp = lambda code: col(fp, code)                          # prior year-end: FS220
 
     def avg(cur_s, pye_s):                                     # FPR (cur + PYE) / 2; robust
         if fp.empty or pye_s is None:
@@ -673,14 +656,9 @@ def rate_table(cycle, cycle_sig):
         return cur_s.where(~use, (cur_s.fillna(0) + pye_s) / 2)
 
     def inv_base(getter):
-        as_cols = [getter("ACCT_AS0007"), getter("ACCT_AS0008"),
-                   getter("ACCT_AS0013"), getter("ACCT_AS0017")]
-        have = pd.concat(as_cols, axis=1).notna().any(axis=1)
-        exact = sum(c.fillna(0) for c in as_cols) + getter("ACCT_730B").fillna(0)
-        resid = (getter("ACCT_010") - getter("ACCT_025B") - getter("ACCT_730A")
-                 - getter("ACCT_007") - getter("ACCT_008") - getter("ACCT_794")
-                 - getter("ACCT_009A") - getter("ACCT_009B") - getter("ACCT_009C"))
-        return exact.where(have, resid)
+        return (getter("ACCT_010") - getter("ACCT_025B") - getter("ACCT_730A")
+                - getter("ACCT_007") - getter("ACCT_008") - getter("ACCT_794")
+                - getter("ACCT_009A") - getter("ACCT_009B") - getter("ACCT_009C"))
 
     ann = 12 / int(cycle[-2:])
     avg_loans = avg(bal("ACCT_025B"), balp("ACCT_025B"))
@@ -850,7 +828,7 @@ def acct_values(cu, cycle, cycle_sig):
     {ACCT_CODE_UPPER: float}. Reads via the cursor (no .df()) so it is resilient to
     pandas/duckdb/runtime version differences on Streamlit Cloud."""
     vals = {}
-    for table in [t for t in available_tables() if t.upper().startswith("FS220")]:
+    for table in ("FS220", "FS220A", "FS220L", "FS220H"):
         try:
             cur = con.execute(
                 f"SELECT * FROM read_parquet('{glob_for(table)}', "
@@ -973,36 +951,28 @@ _ASSET_PARTS = ["ACCT_730A", "ACCT_730B", "ACCT_025B", "ACCT_007", "ACCT_008",
 
 @st.cache_data(show_spinner=False)
 def cu_statement_raw(cu, cycle_sig):
-    """All FS220* account values per cycle for a CU and its charter family. Reads every
-    FS220 schedule so newer FPR codes (NV*, AS*, IS*, NW*, etc.) are available."""
+    """All FS220/FS220A account values per cycle for a CU and its charter family."""
     alias = charter_alias(cycle_sig)
     canon = alias.get(cu, cu)
     family = {c for c in set(alias) | set(alias.values()) if alias.get(c, c) == canon}
     family |= {cu, canon}
     inlist = ",".join("'%s'" % c for c in family)
     out = {}
-    for tbl in [t for t in available_tables() if t.upper().startswith("FS220")]:
+    for tbl in ("FS220", "FS220A"):
         try:
-            curx = con.execute(
+            df = con.execute(
                 f"SELECT * FROM read_parquet('{glob_for(tbl)}', hive_partitioning=true, "
-                f"union_by_name=true) WHERE CAST(CU_NUMBER AS VARCHAR) IN ({inlist})")
-            rows = curx.fetchall()
+                f"union_by_name=true) WHERE CAST(CU_NUMBER AS VARCHAR) IN ({inlist})").df()
         except Exception:
             continue
-        ix = {d[0].upper(): i for i, d in enumerate(curx.description)}
-        cyc_i = ix.get("CYCLE")
-        acc = [(c, i) for c, i in ix.items() if c.startswith("ACCT_")]
-        if cyc_i is None:
-            continue
-        for r in rows:
-            d = out.setdefault(str(r[cyc_i]), {})
-            for name, i in acc:
-                v = r[i]
-                if v is not None:
-                    try:
-                        d[name] = float(v)
-                    except (TypeError, ValueError):
-                        pass
+        acct = [c for c in df.columns if c.upper().startswith("ACCT_")]
+        for _, r in df.iterrows():
+            d = out.setdefault(str(r["cycle"]), {})
+            for c in acct:
+                try:
+                    d[c.upper()] = float(r[c])
+                except (TypeError, ValueError):
+                    pass
     return out
 
 
@@ -1052,6 +1022,32 @@ def _line_value(kind, arg, g):
         tot = g("ACCT_014")
         return None if tot is None else tot - sum(
             (g(c) or 0) for c in ["ACCT_018", "ACCT_860C", "ACCT_825", "ACCT_997"])
+    if kind == "neg_sum":                                  # contra line (e.g. allowance)
+        vals = [g(c) for c in arg if g(c) is not None]
+        return -sum(vals) if vals else None
+    if kind == "na":                                       # reported but unavailable here
+        return None
+    if kind == "total_liab":                               # AP + accrued div + borrowings + shares
+        parts = ["ACCT_825", "ACCT_820A", "ACCT_860C", "ACCT_018"]
+        vals = [g(c) for c in parts]
+        return sum(v or 0 for v in vals) if any(v is not None for v in vals) else None
+    if kind == "total_equity":                             # total assets − total liabilities
+        ta = g("ACCT_010")
+        if ta is None:
+            return None
+        return ta - (_line_value("total_liab", None, g) or 0)
+    if kind == "other_reserves":                           # equity not in undivided earnings
+        te = _line_value("total_equity", None, g)
+        return None if te is None else te - (g("ACCT_940") or 0)
+    if kind == "all_other_assets":                         # residual asset line (foots to 010)
+        ta = g("ACCT_010")
+        if ta is None:
+            return None
+        itemized = sum((g(c) or 0) for c in ["ACCT_730A", "ACCT_730B", "ACCT_NV0158",
+                                             "ACCT_003", "ACCT_025B", "ACCT_007",
+                                             "ACCT_008", "ACCT_794"])
+        allowance = (g("ACCT_719") or 0) + (g("ACCT_AS0048") or 0)
+        return ta - itemized + allowance
     return None
 
 
@@ -1115,28 +1111,37 @@ FPR_FS_CSS = ("<style>"
 
 FPR_BALANCE = [
     ("Assets", "header", None),
-    ("Cash & Other Deposits", "sum", ["ACCT_730A", "ACCT_730B"]),
+    ('Cash &amp; Other Deposits<sup>1</sup>', "sum", ["ACCT_730A", "ACCT_730B"]),
+    ("Total Investments", "code", "ACCT_NV0158"),
+    ("Loans Held for Sale", "code", "ACCT_003"),
     ("Total Loans", "code", "ACCT_025B"),
-    ("Total Investments & Other Assets", "res_assets", None),
-    ("Land & Building", "code", "ACCT_007"),
+    ("(Allowance for Loan &amp; Lease Losses or Allowance for Credit Losses on Loans &amp; "
+     "Leases)", "neg_sum", ["ACCT_719", "ACCT_AS0048"]),
+    ("Land And Building", "code", "ACCT_007"),
     ("Other Fixed Assets", "code", "ACCT_008"),
     ("NCUSIF Deposit", "code", "ACCT_794"),
-    ("Accrued Interest & Other Assets", "sum", ["ACCT_009A", "ACCT_009B", "ACCT_009C"]),
+    ("All Other Assets", "all_other_assets", None),
     ("Total Assets", "code", "ACCT_010", True),
     ("Liabilities, Shares & Equity", "header", None),
-    ("Total Shares & Deposits", "code", "ACCT_018"),
-    ("Borrowings", "code", "ACCT_860C"),
-    ("Accounts Payable & Other Liabilities", "code", "ACCT_825"),
-    ("Other Liabilities", "res_liab", None),
-    ("Net Worth (Equity)", "code", "ACCT_997"),
-    ("Total Liabilities, Shares & Equity", "code", "ACCT_014", True),
+    ("Accounts Payable, Accrued Interest on Borrowings, &amp; Other Liabilities<sup>2</sup>",
+     "code", "ACCT_825"),
+    ("Accrued Dividends &amp; Interest Payable on Shares &amp; Deposits", "code", "ACCT_820A"),
+    ("Allowance for Credit Losses on Off-Balance Sheet Credit Exposures", "na", None),
+    ("Borrowings Notes &amp; Interest Payable", "code", "ACCT_860C"),
+    ("Total Shares &amp; Deposits", "code", "ACCT_018"),
+    ("Total Liabilities", "total_liab", None, True),
+    ("Undivided Earnings", "code", "ACCT_940"),
+    ("Other Reserves", "other_reserves", None),
+    ("Total Equity", "total_equity", None, True),
+    ("Total Liabilities, Shares, &amp; Equity", "code", "ACCT_014", True),
 ]
 FPR_INCOME = [
     ("Income & Expense", "header", None),
     ("Interest Income*", "code", "ACCT_115"),
     ("Interest Expense*", "code", "ACCT_350"),
     ("Net Interest Income*", "nii", None),
-    ("Provision for Loan/Lease Losses (implied)*", "prov", None),
+    ("Provision for Loan/Lease Losses or Total Credit Loss Expense*", "sum",
+     ["ACCT_300", "ACCT_IS0011"]),
     ("Non-Interest Income*", "code", "ACCT_117"),
     ("Non-Interest Expense*", "code", "ACCT_671"),
     ("Net Income (Loss)*", "code", "ACCT_661A", True),
@@ -1231,7 +1236,8 @@ def fpr_summary_html(cu, mode, anchor, cycle_sig, n=5):
         for row in schema:
             label, kind, arg = row[0], row[1], row[2]
             if kind == "header":
-                out.append(f'<tr class="sec"><td colspan="{span_all}">{label.upper()}:</td></tr>')
+                out.append(f'<tr class="sec"><td colspan="{span_all}">'
+                           f'{label.upper().replace("&", "&amp;")}:</td></tr>')
                 continue
             is_tot = len(row) > 3 and row[3]
             vals = [_line_value(kind, arg, _stmt_getter(raw, p, False, mode)) for p in periods]
@@ -1260,14 +1266,6 @@ _NONINV_ASSET = ["ACCT_025B", "ACCT_730A", "ACCT_007", "ACCT_008", "ACCT_794",
 
 
 def _inv_base(v):
-    """Average-investments base for Yield on Average Investments. Per the NCUA FPR
-    (3/31/2022 and after): total investments (AS0007 + AS0008 + AS0013 + AS0017) + cash on
-    deposit (730B). Falls back to a residual estimate — total assets less loans, cash on
-    hand, fixed assets, the NCUSIF deposit, and accrued/other — when those granular
-    investment codes aren't reported."""
-    inv = [v.get(c) for c in ("ACCT_AS0007", "ACCT_AS0008", "ACCT_AS0013", "ACCT_AS0017")]
-    if any(isinstance(x, (int, float)) and x == x for x in inv):
-        return sum((x or 0) for x in inv) + (v.get("ACCT_730B") or 0)
     ta = v.get("ACCT_010")
     if ta is None:
         return None
@@ -1720,32 +1718,20 @@ FPR_SECTIONS = [
 
 
 def _fpr_ratio_dict(raw, cyc, cycle_sig):
-    """Every FPR ratio for one CU at one cycle, per the NCUA FPR Ratio & Formula Guide
-    (v3.3). Codes follow the current-era formulas; any missing code yields None (→ N/A)."""
+    """Every FPR key ratio for one CU at one cycle, from the raw account dict."""
     cur = raw.get(cyc) or {}
     if not cur:
         return {}
-    yr, mm = int(cyc[:4]), cyc[-2:]
-    pye_c = f"{yr - 1}-12"
+    pye_c = f"{int(cyc[:4]) - 1}-12"
     pye = raw.get(pye_c) if pye_c in cycle_sig else None
-    yago = raw.get(f"{yr - 1}-{mm}")                       # prior-year quarter end (PYQE)
-    factor = 12 / int(mm)                                  # Mar 4, Jun 2, Sep 1.333, Dec 1
+    yago = raw.get(f"{int(cyc[:4]) - 1}-{cyc[-2:]}")
+    factor = 12 / int(cyc[-2:])
     ys = _ys_ratios(cur, pye, factor)
     aa = ys.get("avg_assets")
 
     def val(c, d=cur):
         v = d.get(c) if d else None
         return v if isinstance(v, (int, float)) and v == v else None
-
-    def vz(c, d=cur):
-        v = val(c, d)
-        return v if v is not None else 0.0
-
-    def present(*cs, d=cur):
-        return any(val(c, d) is not None for c in cs)
-
-    def sumc(codes, d=cur):
-        return sum(vz(c, d) for c in codes) if present(*codes, d=d) else None
 
     def avg(c):
         a, b = val(c), (val(c, pye) if pye else None)
@@ -1756,183 +1742,77 @@ def _fpr_ratio_dict(raw, cyc, cycle_sig):
     def rt(n, den):
         return 100 * n / den if (n is not None and den not in (None, 0)) else None
 
-    def ann(x):
-        return rt(x * factor, aa) if (x is not None and aa) else None
+    def ann_assets(c):
+        n = val(c)
+        return rt(n * factor, aa) if (n is not None and aa) else None
 
-    def growth(c, absden=False):                           # (AC − PYE)/PYE, annualized
-        a, b = val(c), (val(c, pye) if pye else None)
-        if a is None or b is None:
-            return None
-        den = abs(b) if absden else b
-        return 100 * (a - b) / den * factor if den else None
+    def grow(c):
+        a, b = val(c), val(c, yago)
+        return rt(a - b, b) if (a is not None and b not in (None, 0)) else None
 
     assets, loans, shares = val("ACCT_010"), val("ACCT_025B"), val("ACCT_018")
     nw, members, deln = val("ACCT_997"), val("ACCT_083"), val("ACCT_041B")
-    ni, opex, ie = val("ACCT_661A"), val("ACCT_671"), val("ACCT_350")
-    ii, noni = val("ACCT_115"), val("ACCT_117")
-    fee, other_op = val("ACCT_131"), val("ACCT_IS0020")
-    borrow = val("ACCT_860C")
-    avgL = avg("ACCT_025B")
+    ni, noni, opex = val("ACCT_661A"), val("ACCT_117"), val("ACCT_671")
+    ii, ie = val("ACCT_115"), val("ACCT_350")
+    nii = (ii or 0) - (ie or 0) if (ii is not None or ie is not None) else None
+    prov = (((nii or 0) + (noni or 0) - (opex or 0) + (val("ACCT_440") or 0)) - ni
+            if ni is not None else None)
+    co, rec = val("ACCT_550"), val("ACCT_551")
+    nco_amt = ((co or 0) - (rec or 0)) if (co is not None or rec is not None) else None
+    gross = ((ii or 0) + (noni or 0)) if (ii is not None or noni is not None) else None
+    nonop = val("ACCT_440")
 
-    # Gross income = interest income + fee income + other operating income (115+131+IS0020)
-    if fee is not None or other_op is not None:
-        gross = (ii or 0) + (fee or 0) + (other_op or 0)
-        feeother = (fee or 0) + (other_op or 0)
-    elif ii is not None or noni is not None:
-        gross, feeother = (ii or 0) + (noni or 0), noni
-    else:
-        gross, feeother = None, None
-
-    # Provision = PLLL + credit-loss expense (300 + IS0011); fall back to implied plug
-    if present("ACCT_300", "ACCT_IS0011"):
-        prov = vz("ACCT_300") + vz("ACCT_IS0011")
-    else:
-        nii_ = (ii or 0) - (ie or 0)
-        prov = ((nii_ + (noni or 0) - (opex or 0) + (val("ACCT_440") or 0)) - ni
-                if ni is not None else None)
-
-    # Rolling-12 net charge-offs / average loans
-    def nco_of(d):
-        return (vz("ACCT_550", d) - vz("ACCT_551", d)) if present("ACCT_550", "ACCT_551", d=d) else None
-    nco_amt = nco_of(cur)
-    loans_pyqe = val("ACCT_025B", yago) if yago else None
-    avg_loans_roll = (((loans or 0) + loans_pyqe) / 2
-                      if (loans is not None and loans_pyqe is not None) else None)
-    if pye and yago and nco_amt is not None and avg_loans_roll:
-        rn = nco_amt + (nco_of(pye) or 0) - (nco_of(yago) or 0)
-        nco_roll = rt(rn, avg_loans_roll)
-        delnco = rt((deln or 0) + rn, avg_loans_roll)
-    else:                                                  # fall back to simple annualized
-        nco_roll = rt((nco_amt or 0) * factor, avgL) if nco_amt is not None else None
-        delnco = (rt((deln or 0) + (nco_amt or 0) * factor, avgL)
-                  if (avgL and (deln is not None or nco_amt is not None)) else None)
-    nco_simple = rt((nco_amt or 0) * factor, avgL) if nco_amt is not None else None
-
-    # Investments = total investments + cash on deposit (NV0158 + 730B); residual fallback
-    def inv_total(d):
-        if val("ACCT_NV0158", d) is not None:
-            return vz("ACCT_NV0158", d) + vz("ACCT_730B", d)
+    def inv_base(d):
         ta = val("ACCT_010", d)
         if ta is None:
             return None
         parts = ["ACCT_025B", "ACCT_730A", "ACCT_730B", "ACCT_007", "ACCT_008",
                  "ACCT_794", "ACCT_009A", "ACCT_009B", "ACCT_009C"]
         return ta - sum((val(c, d) or 0) for c in parts)
-    it_cur, it_pye = inv_total(cur), (inv_total(pye) if pye else None)
-    g_invest = (100 * (it_cur - it_pye) / it_pye * factor
-                if (it_cur is not None and it_pye not in (None, 0)) else None)
 
-    # Capital adequacy
-    nw_den = val("ACCT_NW0010") if val("ACCT_NW0010") is not None else assets
-    nw0004 = vz("ACCT_NW0004")
-    acl, alll = vz("ACCT_AS0048"), vz("ACCT_719")
-    nw_acl = (rt((nw or 0) + acl + alll, (assets or 0) + acl + alll)
-              if (present("ACCT_719", "ACCT_AS0048") and nw is not None and assets) else None)
-    rbc = val("ACCT_RB0172")
-    if rbc is None and val("ACCT_RB0171"):
-        rbc = rt(val("ACCT_RB0012"), val("ACCT_RB0171"))
-    gaap_eq = sumc(["ACCT_940", "ACCT_668", "ACCT_658", "ACCT_658A", "ACCT_996",
-                    "ACCT_945B", "ACCT_945A", "ACCT_EQ0009", "ACCT_945C", "ACCT_602"])
-    lc_num = sumc(["ACCT_020B", "ACCT_041B", "ACCT_644", "ACCT_798A", "ACCT_1001F"])
-    loss_cov = rt(lc_num, (nw or 0) + alll + acl) if lc_num is not None else None
-    solv_num = ((assets or 0) - vz("ACCT_860C") - vz("ACCT_925A") - vz("ACCT_825")
-                - vz("ACCT_668") - vz("ACCT_820A"))
-    solvency = rt(solv_num, shares) if (assets is not None and shares) else None
-    classified = (rt(vz("ACCT_719") + vz("ACCT_AS0048") + vz("ACCT_668"), nw)
-                  if (present("ACCT_719", "ACCT_AS0048") and nw) else None)
-    nw_excl_cecl = (rt((nw or 0) - nw0004, (nw_den or 0) - nw0004)
-                    if nw is not None else None)
-    cecl_date = val("ACCT_NW0001")
-
-    # Asset quality
-    htm = rt(val("ACCT_801"), val("ACCT_AS0073"))
-    eq9, as67 = val("ACCT_EQ0009"), val("ACCT_AS0067")
-    afs = (rt(eq9, as67 - eq9) if (eq9 is not None and as67 is not None) else None)
-    other_npa = rt(val("ACCT_798A"), assets)
-
-    # Earnings
-    extra = sum(vz(c) for c in ["ACCT_IS0046", "ACCT_IS0047", "ACCT_421", "ACCT_430",
-                                "ACCT_431", "ACCT_IS0029", "ACCT_IS0030"])
-    fixed_repo = (rt(vz("ACCT_007") + vz("ACCT_008") + vz("ACCT_798A"), assets)
-                  if present("ACCT_007", "ACCT_008", "ACCT_798A") else None)
-    net_op_exp = (ann((opex or 0) - (fee or 0)) if (opex is not None) else None)
-
-    # Asset / liability management
-    lt_num = (vz("ACCT_703A") + vz("ACCT_386A") + vz("ACCT_386B") - vz("ACCT_RL0050")
-              + vz("ACCT_718A3") + vz("ACCT_718A4") - vz("ACCT_CM0099") + vz("ACCT_NV0155")
-              + vz("ACCT_NV0156") + vz("ACCT_NV0157") + vz("ACCT_007") + vz("ACCT_008")
-              + vz("ACCT_794"))
-    net_lt = (rt(lt_num, assets)
-              if (present("ACCT_703A", "ACCT_NV0155", "ACCT_718A3") and assets) else None)
-    sh_borr = ((shares or 0) + (borrow or 0)) if present("ACCT_018", "ACCT_860C") else None
-    ea = (loans + it_cur) if (loans is not None and it_cur is not None) else None
-    reg_sh, drafts = val("ACCT_657"), val("ACCT_902")
-    rd_num = ((reg_sh or 0) + (drafts or 0)) if present("ACCT_657", "ACCT_902") else None
-
-    # Productivity
-    fte = (vz("ACCT_564A") + vz("ACCT_564B") / 2) if present("ACCT_564A", "ACCT_564B") else None
-    nloans = val("ACCT_025A")
+    ib_cur, ib_ago = inv_base(cur), (inv_base(yago) if yago else None)
+    avgL = avg("ACCT_025B")
+    reg_sh, drafts, borrow = val("ACCT_657"), val("ACCT_902"), val("ACCT_860C")
+    sh_borr = ((shares or 0) + (borrow or 0)) if (shares is not None or borrow is not None) else None
+    sh_nw = ((shares or 0) + (nw or 0)) if (shares is not None or nw is not None) else None
+    ea_cur = (loans + ib_cur) if (loans is not None and ib_cur is not None) else None
+    rd_num = ((reg_sh or 0) + (drafts or 0)) if (reg_sh is not None or drafts is not None) else None
 
     d = dict(ys)                                          # yl, yi, yea, cof, spread, nim
     d.update({
-        # capital adequacy
-        "nw_ratio": rt(nw, nw_den),
-        "nw_acl": nw_acl,
-        "rbc": rbc,
-        "gaap_eq": rt(gaap_eq, assets) if gaap_eq is not None else None,
-        "loss_cov": loss_cov,
-        "nw_excl_cecl": nw_excl_cecl,
-        "cecl_adopted": ("Yes" if cecl_date else None),
-        "cecl_date": cecl_date,
-        "solvency": solvency,
-        "classified_nw": classified,
-        # asset quality
+        "nw_ratio": rt(nw, assets),
         "delinq_nw": rt(deln, nw),
         "delinq_loans": rt(deln, loans),
         "delinq_assets": rt(deln, assets),
-        "nco": nco_simple,                                # simple annualized (Historical)
-        "nco_roll": nco_roll,                             # rolling 12-month (Key)
-        "delnco_loans": delnco,
-        "other_npa": other_npa,
-        "htm_fair": htm,
-        "afs_gl": afs,
-        # earnings
-        "roaa": ann(ni),
-        "roaa_ex": ann((ni - extra)) if ni is not None else None,
-        "gross_avg": ann(gross),
-        "fee_avg": ann(feeother),
-        "intexp_avg": ann(ie),                            # cost of funds / avg assets
-        "net_margin_avg": ann((gross - (ie or 0))) if gross is not None else None,
-        "opex_avg": ann(opex),
-        "prov_avg": ann(prov),
-        "op_gross": rt(opex, gross) if (opex is not None and gross) else None,
-        "net_op_exp": net_op_exp,
-        "fixed_repo": fixed_repo,
-        # asset / liability management
-        "net_lt": net_lt,
+        "nco": (rt(nco_amt * factor, avg("ACCT_025B")) if nco_amt is not None else None),
+        "roaa": (rt(ni * factor, aa) if (ni is not None and aa) else None),
+        "gross_avg": (rt(gross * factor, aa) if (gross is not None and aa) else None),
+        "fee_avg": ann_assets("ACCT_117"),
+        "opex_avg": ann_assets("ACCT_671"),
+        "prov_avg": (rt(prov * factor, aa) if (prov is not None and aa) else None),
+        "intexp_avg": ann_assets("ACCT_350"),
+        "op_gross": (rt(opex, gross) if (opex is not None and gross) else None),
         "loans_shares": rt(loans, shares),
         "loans_assets": rt(loans, assets),
         "shares_assets": rt(shares, assets),
-        "borrow_shares": rt(borrow, shares),
-        "borrow_sh_nw": rt(borrow, ((shares or 0) + (nw or 0)) if present("ACCT_018", "ACCT_997") else None),
+        "borrow_shares": rt(val("ACCT_860C"), shares),
+        "cash_assets": rt((val("ACCT_730A") or 0) + (val("ACCT_730B") or 0), assets),
+        "members": members,
+        "avg_shares_member": (shares / members if (shares is not None and members) else None),
+        "g_assets": grow("ACCT_010"), "g_loans": grow("ACCT_025B"),
+        "g_shares": grow("ACCT_018"), "g_nw": grow("ACCT_997"),
+        "g_members": grow("ACCT_083"),
+        "roaa_ex": (rt((ni - (nonop or 0)) * factor, aa) if (ni is not None and aa) else None),
+        "g_invest": (rt(ib_cur - ib_ago, ib_ago)
+                     if (ib_cur is not None and ib_ago not in (None, 0)) else None),
+        "delnco_loans": (rt((deln or 0) + (nco_amt or 0) * factor, avgL)
+                         if (avgL and (deln is not None or nco_amt is not None)) else None),
+        "net_margin_avg": (rt((gross - (ie or 0)) * factor, aa)
+                           if (gross is not None and aa) else None),
+        "borrow_sh_nw": rt(borrow, sh_nw),
         "reg_shares": rt(reg_sh, sh_borr),
         "reg_drafts": rt(rd_num, sh_borr),
-        "shares_dep_borr_ea": rt(sh_borr, ea),
-        "cash_assets": rt(vz("ACCT_730A") + vz("ACCT_730B"), assets),
-        "cash_st_assets": (rt(vz("ACCT_730A") + vz("ACCT_730B") + vz("ACCT_NV0153"), assets)
-                           if present("ACCT_730A", "ACCT_730B", "ACCT_NV0153") else None),
-        # productivity
-        "members": members,
-        "mem_potential": rt(members, val("ACCT_084")),
-        "borrowers_mem": rt(nloans, members),
-        "mem_fte": (members / fte if (members is not None and fte) else None),
-        "avg_shares_member": (shares / members if (shares is not None and members) else None),
-        "avg_loan_bal": (loans / nloans if (loans is not None and nloans) else None),
-        "salary_fte": ((vz("ACCT_210") * factor) / fte if (present("ACCT_210") and fte) else None),
-        # growth (NCUA basis: (current − prior year-end) / prior year-end, annualized)
-        "g_assets": growth("ACCT_010"), "g_loans": growth("ACCT_025B"),
-        "g_shares": growth("ACCT_018"), "g_nw": growth("ACCT_997", absden=True),
-        "g_members": growth("ACCT_083"), "g_invest": g_invest,
+        "shares_dep_borr_ea": rt(sh_borr, ea_cur),
     })
     return d
 
@@ -1968,17 +1848,17 @@ def fpr_ratio_table(raw, periods, mode, cycle_sig):
 FPR_KEY_SECTIONS = [
     ("Capital Adequacy Ratios", [
         ("Net Worth / Total Assets for Prompt Corrective Action", "nw_ratio", "pct", "6"),
-        ("Net Worth + ALLL or ACL / Total Assets + ALLL or ACL", "nw_acl", "pct", ""),
-        ("Risk-Based Capital Ratio", "rbc", "pct", ""),
-        ("GAAP Equity / Total Assets", "gaap_eq", "pct", ""),
-        ("Loss Coverage", "loss_cov", "pct", ""),
+        ("Net Worth + ALLL or ACL / Total Assets + ALLL or ACL", None, "pct", ""),
+        ("Risk-Based Capital Ratio", None, "pct", ""),
+        ("GAAP Equity / Total Assets", None, "pct", ""),
+        ("Loss Coverage", None, "pct", ""),
     ]),
     ("Asset Quality Ratios", [
         ("Delinquent Loans / Total Loans", "delinq_loans", "pct", ""),
         ("Delinquent Loans / Net Worth", "delinq_nw", "pct", ""),
-        ("Rolling 12 Month Net Charge Offs / Average Loans", "nco_roll", "pct", "2"),
+        ("Rolling 12 Month Net Charge Offs / Average Loans", "nco", "pct", "2"),
         ("Delinquent Loans + Net Charge-Offs / Average Loans", "delnco_loans", "pct", ""),
-        ("Other Non-Performing Assets / Total Assets", "other_npa", "pct", ""),
+        ("Other Non-Performing Assets / Total Assets", None, "pct", ""),
     ]),
     ("Management Ratios", [
         ("Net Worth Growth", "g_nw", "pct", "1"),
@@ -1996,7 +1876,7 @@ FPR_KEY_SECTIONS = [
     ]),
     ("Liquidity", [
         ("Total Loans / Total Assets", "loans_assets", "pct", ""),
-        ("Cash + Short-Term Investments / Assets", "cash_st_assets", "pct", "3"),
+        ("Cash + Short-Term Investments / Assets", None, "pct", "3"),
     ]),
     ("Sensitivity to Market Risk", [
         ("Est. NEV Tool Post Shock Ratio", None, "pct", "4"),
@@ -2007,20 +1887,20 @@ FPR_KEY_SECTIONS = [
 # ---- NCUA Historical Ratios layout (mirrors the FPR "Historical Ratios" report) ----
 FPR_HIST_SECTIONS = [
     ("Capital Adequacy", [
-        ("Has the credit union adopted ASC topic 326 (CECL)?", "cecl_adopted", "text", ""),
+        ("Has the credit union adopted ASC topic 326 (CECL)?", None, "pct", ""),
         ("Effective date of adoption of ASC Topic 326 - Financial Instruments - "
-         "Credit Losses (CECL)", "cecl_date", "text", ""),
-        ("Net Worth / Total Assets excluding CECL Transition Provision", "nw_excl_cecl", "pct", "3"),
+         "Credit Losses (CECL)", None, "pct", ""),
+        ("Net Worth / Total Assets excluding CECL Transition Provision", "nw_ratio", "pct", "3"),
         ("Net Worth / PCA Opt. Total Assets (if applies)", None, "pct", ""),
         ("Net Worth / Total Assets excluding one-time adjustment to undivided earnings for "
          "the adoption of ASC topic 326 (CECL)", None, "pct", "1"),
-        ("Solvency Evaluation (Estimated)", "solvency", "pct", ""),
-        ("Classified Assets (Estimated) / Net Worth", "classified_nw", "pct", ""),
+        ("Solvency Evaluation (Estimated)", None, "pct", ""),
+        ("Classified Assets (Estimated) / Net Worth", None, "pct", ""),
     ]),
     ("Asset Quality", [
         ("Net Charge-Offs / Average Loans", "nco", "pct", "*"),
-        ("Fair (Market) HTM Invest Value / Book Value HTM Invest.", "htm_fair", "pct", ""),
-        ("Accum Unreal G/L On AFS / Cost Of AFS", "afs_gl", "pct", ""),
+        ("Fair (Market) HTM Invest Value / Book Value HTM Invest.", None, "pct", ""),
+        ("Accum Unreal G/L On AFS / Cost Of AFS", None, "pct", ""),
         ("Delinquent Loans / Assets", "delinq_assets", "pct", ""),
     ]),
     ("Earnings", [
@@ -2032,11 +1912,11 @@ FPR_HIST_SECTIONS = [
         ("Net Margin / Avg. Assets", "net_margin_avg", "pct", "*"),
         ("Net Interest Margin / Avg. Assets", "nim", "pct", "*"),
         ("Non-Interest Expense / Gross Income", "op_gross", "pct", ""),
-        ("Fixed Assets & Foreclosed & Repossessed Assets / Total Assets", "fixed_repo", "pct", ""),
-        ("Net Operating Exp. / Avg. Assets", "net_op_exp", "pct", "*"),
+        ("Fixed Assets & Foreclosed & Repossessed Assets / Total Assets", None, "pct", ""),
+        ("Net Operating Exp. / Avg. Assets", None, "pct", "*"),
     ]),
     ("Asset / Liability Management", [
-        ("Net Long-Term Assets / Total Assets", "net_lt", "pct", ""),
+        ("Net Long-Term Assets / Total Assets", None, "pct", ""),
         ("Reg. Shares / Total Shares & Borrowings", "reg_shares", "pct", ""),
         ("Total Loans / Total Shares", "loans_shares", "pct", ""),
         ("Total Shares, Dep. & Borrs / Earning Assets", "shares_dep_borr_ea", "pct", ""),
@@ -2044,12 +1924,12 @@ FPR_HIST_SECTIONS = [
         ("Borrowings / Total Shares & Net Worth", "borrow_sh_nw", "pct", ""),
     ]),
     ("Productivity", [
-        ("Members / Potential Members", "mem_potential", "pct", ""),
-        ("Borrowers / Members", "borrowers_mem", "pct", ""),
-        ("Members / Full-Time Empl.", "mem_fte", "num", ""),
+        ("Members / Potential Members", None, "pct", ""),
+        ("Borrowers / Members", None, "pct", ""),
+        ("Members / Full-Time Empl.", None, "num", ""),
         ("Avg. Shares Per Member", "avg_shares_member", "money", ""),
-        ("Avg. Loan Balance", "avg_loan_bal", "money", ""),
-        ("Salary And Benefits / Full-Time Empl.", "salary_fte", "money", "*"),
+        ("Avg. Loan Balance", None, "money", ""),
+        ("Salary And Benefits / Full-Time Empl.", None, "money", "*"),
     ]),
 ]
 
@@ -2057,8 +1937,6 @@ FPR_HIST_SECTIONS = [
 def _fpr_ratio_cell(v, fmt):
     if v is None or (isinstance(v, float) and v != v):
         return "N/A"
-    if fmt == "text":
-        return str(v)
     if fmt == "pct":
         return f"{v:.2f}"
     if fmt == "money":
@@ -2081,7 +1959,7 @@ def fpr_peer_avg(band, cycle, cycle_sig):
     raw_by = {c: {} for c in cus}
     inlist = ",".join("'%s'" % c for c in cus)
     cyclist = ",".join("'%s'" % c for c in want)
-    for tbl in [t for t in available_tables() if t.upper().startswith("FS220")]:
+    for tbl in ("FS220", "FS220A"):
         try:
             curx = con.execute(
                 f"SELECT * FROM read_parquet('{glob_for(tbl)}', hive_partitioning=true, "
@@ -2619,11 +2497,12 @@ elif page == "FPR":
                     '<div class="fprnote">'
                     '* Income / expense items are year-to-date; the related %Chg ratios are '
                     'annualized. &nbsp; %Chg is N/A when the prior period is zero.<br>'
-                    '“Total Investments &amp; Other Assets” and “Other Liabilities” are residual '
-                    'lines derived to foot to the reported totals; NCUA’s finer splits '
-                    '(investment detail, allowance for credit losses, undivided earnings vs. '
-                    'reserves) require additional verified account codes. Provision is implied '
-                    '(a net-income plug), not the separately reported figure.'
+                    '1 Prior to March 2022, Time and Other Deposits were included in '
+                    'Investments. &nbsp; 2 Prior to 3/31/2022 includes “Subordinated Debt '
+                    'Included in Net Worth” and “Non-Trading Derivative Liabilities”.<br>'
+                    'All Other Assets, Total Liabilities, Other Reserves, and Total Equity are '
+                    'derived to foot to the reported totals. The off-balance-sheet credit-loss '
+                    'allowance is shown N/A (account not available in this dataset).'
                     '</div>', unsafe_allow_html=True)
         else:
             cs_pool = [c for c in sorted(sig)
@@ -2647,23 +2526,25 @@ elif page == "FPR":
                     note = (
                         '<div class="fprnote">'
                         '1 Exam-date ratios are annualized. &nbsp; 2 Net charge-offs over the '
-                        'trailing 12 months. &nbsp; 3 Relies on the maturity distribution of '
-                        'investments. &nbsp; 4 Applies to credit unions under $100M. &nbsp; '
-                        '6 Net-worth ratio per NCUA Part 702 (Account 998).<br>' + peer_note
-                        + '<br>Formulas follow the NCUA FPR Ratio &amp; Formula Guide (v3.3). '
-                        'The NEV-tool ratios apply only to credit unions under $100M and the '
-                        'Risk-Based Capital ratio only to complex credit unions; either is N/A '
-                        'otherwise. Any other N/A means the credit union did not report the '
-                        'underlying account.</div>')
+                        'trailing 12 months (approximated here as the annualized year-to-date '
+                        'figure). &nbsp; 3 Relies on the maturity distribution of investments. '
+                        '&nbsp; 4 Applies to credit unions under $500M. &nbsp; 6 Net-worth ratio '
+                        'per NCUA Part 702 (Account 998).<br>' + peer_note + '<br>'
+                        'Ratios needing account codes not verified in this dataset — ALLL/ACL-'
+                        'adjusted capital, GAAP equity, risk-based capital, short-term '
+                        'investments, other non-performing assets, and the NEV tool — are shown '
+                        'N/A.</div>')
                 else:
                     note = ('<div class="fprnote">'
                             '* Annualization factor: March = 4; June = 2; September = 4/3; '
                             'December = 1.<br>' + peer_note + '<br>'
-                            'Formulas follow the NCUA FPR Ratio &amp; Formula Guide (v3.3), '
-                            'average-balance basis (current period + prior year-end ÷ 2). The '
-                            'PCA-optional and one-time-CECL-adjustment net-worth ratios are N/A '
-                            'on 3/31/2023 and after, per NCUA. Any other N/A means the credit '
-                            'union did not report the underlying account.</div>')
+                            'Ratios needing account codes not verified in this dataset — CECL '
+                            'adoption flags, PCA-optional and CECL-adjusted net worth, solvency '
+                            'and classified-assets estimates, HTM/AFS fair-value ratios, '
+                            'long-term-asset and net-operating-expense ratios, and the FTE / '
+                            'borrower / potential-member productivity lines — are shown N/A. '
+                            'Computations use the NCUA FPR average-balance basis '
+                            '(current period + prior year-end ÷ 2).</div>')
                 st.markdown(note, unsafe_allow_html=True)
 
 # ============================================================ COMPARE
