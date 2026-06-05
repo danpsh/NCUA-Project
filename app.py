@@ -825,23 +825,25 @@ def score_history(cu, basis, lens, cycle, cycle_sig):
 @st.cache_data(show_spinner=False)
 def acct_values(cu, cycle, cycle_sig):
     """All FS220 + FS220A account balances for one credit union / cycle as
-    {ACCT_CODE_UPPER: float}."""
+    {ACCT_CODE_UPPER: float}. Reads via the cursor (no .df()) so it is resilient to
+    pandas/duckdb/runtime version differences on Streamlit Cloud."""
     vals = {}
     for table in ("FS220", "FS220A", "FS220L", "FS220H"):
         try:
-            df = con.execute(
+            cur = con.execute(
                 f"SELECT * FROM read_parquet('{glob_for(table)}', "
                 "hive_partitioning=true, union_by_name=true) "
-                "WHERE cycle = ? AND CU_NUMBER = ?", [cycle, cu]).df()
+                "WHERE cycle = ? AND CU_NUMBER = ?", [cycle, cu])
+            rows = cur.fetchall()
         except Exception:
             continue
-        if df.empty:
+        if not rows:
             continue
-        r = df.iloc[0]
-        for c in df.columns:
+        cols = [d[0] for d in cur.description]
+        for c, v in zip(cols, rows[0]):
             try:
-                x = float(r[c])
-                if x == x:
+                x = float(v)
+                if x == x:                       # skip NaN
                     vals.setdefault(c.upper(), x)
             except (TypeError, ValueError):
                 pass
