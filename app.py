@@ -1007,7 +1007,10 @@ def _line_value(kind, arg, g):
         a, b = g("ACCT_115"), g("ACCT_350")
         return None if a is None and b is None else (a or 0) - (b or 0)
     if kind == "prov":
-        ni = g("ACCT_661A")
+        direct = [g("ACCT_300"), g("ACCT_IS0011")]
+        if any(v is not None for v in direct):          # reported provision / credit-loss exp
+            return sum(v or 0 for v in direct)
+        ni = g("ACCT_661A")                              # fall back to the net-income identity
         if ni is None:
             return None
         nii = (g("ACCT_115") or 0) - (g("ACCT_350") or 0)
@@ -1140,8 +1143,7 @@ FPR_INCOME = [
     ("Interest Income*", "code", "ACCT_115"),
     ("Interest Expense*", "code", "ACCT_350"),
     ("Net Interest Income*", "nii", None),
-    ("Provision for Loan/Lease Losses or Total Credit Loss Expense*", "sum",
-     ["ACCT_300", "ACCT_IS0011"]),
+    ("Provision for Loan/Lease Losses or Total Credit Loss Expense*", "prov", None),
     ("Non-Interest Income*", "code", "ACCT_117"),
     ("Non-Interest Expense*", "code", "ACCT_671"),
     ("Net Income (Loss)*", "code", "ACCT_661A", True),
