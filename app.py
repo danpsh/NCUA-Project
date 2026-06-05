@@ -1736,6 +1736,11 @@ def _fpr_ratio_dict(raw, cyc, cycle_sig):
 
     ib_cur, ib_ago = inv_base(cur), (inv_base(yago) if yago else None)
     avgL = avg("ACCT_025B")
+    reg_sh, drafts, borrow = val("ACCT_657"), val("ACCT_902"), val("ACCT_860C")
+    sh_borr = ((shares or 0) + (borrow or 0)) if (shares is not None or borrow is not None) else None
+    sh_nw = ((shares or 0) + (nw or 0)) if (shares is not None or nw is not None) else None
+    ea_cur = (loans + ib_cur) if (loans is not None and ib_cur is not None) else None
+    rd_num = ((reg_sh or 0) + (drafts or 0)) if (reg_sh is not None or drafts is not None) else None
 
     d = dict(ys)                                          # yl, yi, yea, cof, spread, nim
     d.update({
@@ -1766,6 +1771,12 @@ def _fpr_ratio_dict(raw, cyc, cycle_sig):
                      if (ib_cur is not None and ib_ago not in (None, 0)) else None),
         "delnco_loans": (rt((deln or 0) + (nco_amt or 0) * factor, avgL)
                          if (avgL and (deln is not None or nco_amt is not None)) else None),
+        "net_margin_avg": (rt((gross - (ie or 0)) * factor, aa)
+                           if (gross is not None and aa) else None),
+        "borrow_sh_nw": rt(borrow, sh_nw),
+        "reg_shares": rt(reg_sh, sh_borr),
+        "reg_drafts": rt(rd_num, sh_borr),
+        "shares_dep_borr_ea": rt(sh_borr, ea_cur),
     })
     return d
 
@@ -1834,6 +1845,55 @@ FPR_KEY_SECTIONS = [
     ("Sensitivity to Market Risk", [
         ("Est. NEV Tool Post Shock Ratio", None, "pct", "4"),
         ("Est. NEV Tool Post Shock Sensitivity", None, "pct", "4"),
+    ]),
+]
+
+# ---- NCUA Historical Ratios layout (mirrors the FPR "Historical Ratios" report) ----
+FPR_HIST_SECTIONS = [
+    ("Capital Adequacy", [
+        ("Has the credit union adopted ASC topic 326 (CECL)?", None, "pct", ""),
+        ("Effective date of adoption of ASC Topic 326 - Financial Instruments - "
+         "Credit Losses (CECL)", None, "pct", ""),
+        ("Net Worth / Total Assets excluding CECL Transition Provision", "nw_ratio", "pct", "3"),
+        ("Net Worth / PCA Opt. Total Assets (if applies)", None, "pct", ""),
+        ("Net Worth / Total Assets excluding one-time adjustment to undivided earnings for "
+         "the adoption of ASC topic 326 (CECL)", None, "pct", "1"),
+        ("Solvency Evaluation (Estimated)", None, "pct", ""),
+        ("Classified Assets (Estimated) / Net Worth", None, "pct", ""),
+    ]),
+    ("Asset Quality", [
+        ("Net Charge-Offs / Average Loans", "nco", "pct", "*"),
+        ("Fair (Market) HTM Invest Value / Book Value HTM Invest.", None, "pct", ""),
+        ("Accum Unreal G/L On AFS / Cost Of AFS", None, "pct", ""),
+        ("Delinquent Loans / Assets", "delinq_assets", "pct", ""),
+    ]),
+    ("Earnings", [
+        ("Gross Income / Average Assets", "gross_avg", "pct", "*"),
+        ("Yield on Average Loans", "yl", "pct", ""),
+        ("Yield on Average Investments", "yi", "pct", "*"),
+        ("Fee & Other Op. Income / Avg. Assets", "fee_avg", "pct", "*"),
+        ("Cost of Funds / Avg. Assets", "intexp_avg", "pct", "*"),
+        ("Net Margin / Avg. Assets", "net_margin_avg", "pct", "*"),
+        ("Net Interest Margin / Avg. Assets", "nim", "pct", "*"),
+        ("Non-Interest Expense / Gross Income", "op_gross", "pct", ""),
+        ("Fixed Assets & Foreclosed & Repossessed Assets / Total Assets", None, "pct", ""),
+        ("Net Operating Exp. / Avg. Assets", None, "pct", "*"),
+    ]),
+    ("Asset / Liability Management", [
+        ("Net Long-Term Assets / Total Assets", None, "pct", ""),
+        ("Reg. Shares / Total Shares & Borrowings", "reg_shares", "pct", ""),
+        ("Total Loans / Total Shares", "loans_shares", "pct", ""),
+        ("Total Shares, Dep. & Borrs / Earning Assets", "shares_dep_borr_ea", "pct", ""),
+        ("Reg Shares + Share Drafts / Total Shares & Borrs", "reg_drafts", "pct", ""),
+        ("Borrowings / Total Shares & Net Worth", "borrow_sh_nw", "pct", ""),
+    ]),
+    ("Productivity", [
+        ("Members / Potential Members", None, "pct", ""),
+        ("Borrowers / Members", None, "pct", ""),
+        ("Members / Full-Time Empl.", None, "num", ""),
+        ("Avg. Shares Per Member", "avg_shares_member", "money", ""),
+        ("Avg. Loan Balance", None, "money", ""),
+        ("Salary And Benefits / Full-Time Empl.", None, "money", "*"),
     ]),
 ]
 
@@ -2410,7 +2470,7 @@ elif page == "FPR":
         else:
             cs_pool = [c for c in sorted(sig)
                        if c <= cycle and (pmode != "Years" or c.endswith("-12"))]
-            sections = FPR_KEY_SECTIONS if view == "Key Ratios" else FPR_SECTIONS
+            sections = FPR_KEY_SECTIONS if view == "Key Ratios" else FPR_HIST_SECTIONS
             n = 5 if view == "Key Ratios" else (10 if pmode == "Years" else 13)
             html, n_peer = fpr_ratio_html(cu_pick, sections, pmode, cycle, sig, band, n,
                                           peer=True)
@@ -2438,10 +2498,16 @@ elif page == "FPR":
                         'investments, other non-performing assets, and the NEV tool — are shown '
                         'N/A.</div>')
                 else:
-                    note = ('<div class="fprnote">Computed from the 5300 data on the NCUA FPR '
-                            'average-balance basis (current period + prior year-end ÷ 2); income '
-                            'annualized year-to-date, growth year-over-year.<br>' + peer_note
-                            + '</div>')
+                    note = ('<div class="fprnote">'
+                            '* Annualization factor: March = 4; June = 2; September = 4/3; '
+                            'December = 1.<br>' + peer_note + '<br>'
+                            'Ratios needing account codes not verified in this dataset — CECL '
+                            'adoption flags, PCA-optional and CECL-adjusted net worth, solvency '
+                            'and classified-assets estimates, HTM/AFS fair-value ratios, '
+                            'long-term-asset and net-operating-expense ratios, and the FTE / '
+                            'borrower / potential-member productivity lines — are shown N/A. '
+                            'Computations use the NCUA FPR average-balance basis '
+                            '(current period + prior year-end ÷ 2).</div>')
                 st.markdown(note, unsafe_allow_html=True)
 
 # ============================================================ COMPARE
