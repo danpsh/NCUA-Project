@@ -1007,9 +1007,12 @@ def _line_value(kind, arg, g):
         a, b = g("ACCT_115"), g("ACCT_350")
         return None if a is None and b is None else (a or 0) - (b or 0)
     if kind == "prov":
+        v = g("ACCT_IS0017")                             # Total Credit Loss Expense
+        if v is not None:
+            return v
         direct = [g("ACCT_300"), g("ACCT_IS0011")]
-        if any(v is not None for v in direct):          # reported provision / credit-loss exp
-            return sum(v or 0 for v in direct)
+        if any(x is not None for x in direct):
+            return sum(x or 0 for x in direct)
         ni = g("ACCT_661A")                              # fall back to the net-income identity
         if ni is None:
             return None
@@ -1046,10 +1049,10 @@ def _line_value(kind, arg, g):
         ta = g("ACCT_010")
         if ta is None:
             return None
-        itemized = sum((g(c) or 0) for c in ["ACCT_730A", "ACCT_730B", "ACCT_NV0158",
+        itemized = sum((g(c) or 0) for c in ["ACCT_AS0009", "ACCT_AS0013", "ACCT_AS0017",
                                              "ACCT_003", "ACCT_025B", "ACCT_007",
                                              "ACCT_008", "ACCT_794"])
-        allowance = (g("ACCT_719") or 0) + (g("ACCT_AS0048") or 0)
+        allowance = (g("ACCT_AS0048") or 0)
         return ta - itemized + allowance
     return None
 
@@ -1114,12 +1117,12 @@ FPR_FS_CSS = ("<style>"
 
 FPR_BALANCE = [
     ("Assets", "header", None),
-    ('Cash &amp; Other Deposits<sup>1</sup>', "sum", ["ACCT_730A", "ACCT_730B"]),
-    ("Total Investments", "code", "ACCT_NV0158"),
+    ('Cash &amp; Other Deposits<sup>1</sup>', "code", "ACCT_AS0009"),
+    ("Total Investments", "sum", ["ACCT_AS0013", "ACCT_AS0017"]),
     ("Loans Held for Sale", "code", "ACCT_003"),
     ("Total Loans", "code", "ACCT_025B"),
     ("(Allowance for Loan &amp; Lease Losses or Allowance for Credit Losses on Loans &amp; "
-     "Leases)", "neg_sum", ["ACCT_719", "ACCT_AS0048"]),
+     "Leases)", "neg_sum", ["ACCT_AS0048"]),
     ("Land And Building", "code", "ACCT_007"),
     ("Other Fixed Assets", "code", "ACCT_008"),
     ("NCUSIF Deposit", "code", "ACCT_794"),
