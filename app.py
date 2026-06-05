@@ -639,6 +639,23 @@ def rate_table(cycle, cycle_sig):
         return pd.DataFrame()
     pye = f"{int(cycle[:4]) - 1}-12"
     fp = read("FS220", pye) if pye in cycle_sig else pd.DataFrame()
+    # Bring granular investment codes (AS0007/AS0008/AS0013/AS0017) in from any other
+    # FS220 schedule so Yield on Average Investments uses the exact NCUA denominator.
+    for t in available_tables():
+        tu = t.upper()
+        if not tu.startswith("FS220") or tu in ("FS220", "FS220A"):
+            continue
+        xc = read(t, cycle)
+        if not xc.empty:
+            cols = [c for c in xc.columns if c not in a.columns and c not in f.columns]
+            if cols:
+                a = a.join(xc[cols], how="left")
+        if pye in cycle_sig and not fp.empty:
+            xp = read(t, pye)
+            if not xp.empty:
+                cols = [c for c in xp.columns if c not in fp.columns]
+                if cols:
+                    fp = fp.join(xp[cols], how="left")
     idx = f.index
 
     def col(df, code):
@@ -647,7 +664,7 @@ def rate_table(cycle, cycle_sig):
         return pd.to_numeric(df[code], errors="coerce").reindex(idx)
 
     bal = lambda code: col(f, code).fillna(col(a, code))      # balances: FS220, then FS220A
-    balp = lambda code: col(fp, code)                          # prior year-end: FS220
+    balp = lambda code: col(fp, code)                          # prior year-end
 
     def avg(cur_s, pye_s):                                     # FPR (cur + PYE) / 2; robust
         if fp.empty or pye_s is None:
@@ -656,9 +673,14 @@ def rate_table(cycle, cycle_sig):
         return cur_s.where(~use, (cur_s.fillna(0) + pye_s) / 2)
 
     def inv_base(getter):
-        return (getter("ACCT_010") - getter("ACCT_025B") - getter("ACCT_730A")
-                - getter("ACCT_007") - getter("ACCT_008") - getter("ACCT_794")
-                - getter("ACCT_009A") - getter("ACCT_009B") - getter("ACCT_009C"))
+        as_cols = [getter("ACCT_AS0007"), getter("ACCT_AS0008"),
+                   getter("ACCT_AS0013"), getter("ACCT_AS0017")]
+        have = pd.concat(as_cols, axis=1).notna().any(axis=1)
+        exact = sum(c.fillna(0) for c in as_cols) + getter("ACCT_730B").fillna(0)
+        resid = (getter("ACCT_010") - getter("ACCT_025B") - getter("ACCT_730A")
+                 - getter("ACCT_007") - getter("ACCT_008") - getter("ACCT_794")
+                 - getter("ACCT_009A") - getter("ACCT_009B") - getter("ACCT_009C"))
+        return exact.where(have, resid)
 
     ann = 12 / int(cycle[-2:])
     avg_loans = avg(bal("ACCT_025B"), balp("ACCT_025B"))
@@ -1238,6 +1260,14 @@ _NONINV_ASSET = ["ACCT_025B", "ACCT_730A", "ACCT_007", "ACCT_008", "ACCT_794",
 
 
 def _inv_base(v):
+    """Average-investments base for Yield on Average Investments. Per the NCUA FPR
+    (3/31/2022 and after): total investments (AS0007 + AS0008 + AS0013 + AS0017) + cash on
+    deposit (730B). Falls back to a residual estimate — total assets less loans, cash on
+    hand, fixed assets, the NCUSIF deposit, and accrued/other — when those granular
+    investment codes aren't reported."""
+    inv = [v.get(c) for c in ("ACCT_AS0007", "ACCT_AS0008", "ACCT_AS0013", "ACCT_AS0017")]
+    if any(isinstance(x, (int, float)) and x == x for x in inv):
+        return sum((x or 0) for x in inv) + (v.get("ACCT_730B") or 0)
     ta = v.get("ACCT_010")
     if ta is None:
         return None
