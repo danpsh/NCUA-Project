@@ -2419,15 +2419,89 @@ def _spark_svg(vals, w=130, h=30, color="#2e5fa3"):
             f"<circle cx='{lx:.1f}' cy='{ly:.1f}' r='2.3' fill='{color}'/></svg>")
 
 
+PACKAGE_EXTRA_CSS = """<style>
+.pg{page-break-before:always}
+.pg.first{page-break-before:auto}
+.cover{min-height:58vh;display:flex;flex-direction:column;justify-content:center}
+.cover .big{font-size:2.1rem;font-weight:700;margin:0;line-height:1.15}
+.cover .mid{font-size:1.05rem;color:#374151;margin-top:8px}
+.cover .tag{margin-top:26px;font-size:.92rem;color:#6b7280;line-height:1.6}
+.exec-kpis{display:flex;gap:10px;flex-wrap:wrap;margin:6px 0 14px}
+.ek{flex:1 1 30%;min-width:150px;background:#f8fafc;border:1px solid #eceff3;border-radius:8px;padding:10px 12px}
+.ek-l{font-size:.72rem;color:#6b7280;text-transform:uppercase;letter-spacing:.03em}
+.ek-v{font-size:1.25rem;font-weight:600;margin-top:2px}
+.ek-d{font-size:.72rem;margin-top:4px;color:#6b7280}
+.ek-d .pos{color:#2e8b57}.ek-d .neg{color:#c0392b}
+.stars{color:#e0a800;font-size:1.25rem;letter-spacing:2px}
+.bullets{margin:6px 0 0;padding-left:18px}
+.bullets li{margin:5px 0;font-size:.9rem;line-height:1.35}
+h3{font-size:.92rem;margin:14px 0 5px;color:#374151}
+.runfoot{display:none}
+.confid{color:#b45309;font-weight:600}
+@media print{
+  .runfoot{display:block;position:fixed;bottom:0;left:0;right:0;font-size:.64rem;
+           color:#7a818c;border-top:1px solid #e5e7eb;padding:4px 14px;background:#fff}
+  .page{padding-bottom:34px}
+}
+</style>"""
+
+
+def _ordinal(n):
+    n = int(n)
+    suf = "th" if 10 <= n % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suf}"
+
+
+def _packet_narrative(facts, max_bullets=6):
+    """Turn prepared facts into board-ready highlight bullets. Each fact:
+    {label, value_str, qoq_str|None, yoy_str|None, pct|None, peer_str|None, better|None}.
+    Pure — returns a list of plain sentences."""
+    out = []
+    for f in facts:
+        parts = [f"{f['label']} {f['value_str']}"]
+        ds = [d for d in (f.get("qoq_str") and f"{f['qoq_str']} QoQ",
+                          f.get("yoy_str") and f"{f['yoy_str']} YoY") if d]
+        if ds:
+            parts.append("(" + ", ".join(ds) + ")")
+        sent = " ".join(parts)
+        if f.get("pct") is not None:
+            sent += f", {_ordinal(f['pct'])} percentile of peers"
+        if f.get("better") is True and f.get("peer_str"):
+            sent += f" — ahead of the peer median of {f['peer_str']}"
+        elif f.get("better") is False and f.get("peer_str"):
+            sent += f" — trails the peer median of {f['peer_str']}"
+        out.append(sent + ".")
+        if len(out) >= max_bullets:
+            break
+    return out
+
+
 def board_packet_html(ctx):
-    """Build a standalone, print-styled HTML board packet from a prepared context dict.
-    Pure formatting — no Streamlit calls — so it is unit-testable and the output can be
-    downloaded as a file the browser saves to PDF (Print → Save as PDF)."""
+    """Assemble a multi-page, print-styled institutional board package from a prepared
+    context dict. Pure formatting — no Streamlit calls — so it is unit-testable and the
+    output downloads as a standalone file the browser prints to PDF. Heavy tables
+    (statements, FPR ratios, peer bars) are passed in pre-rendered as ctx['*_html'];
+    this arranges them into break-isolated sections with a cover, an executive summary
+    with auto-narrative, and a repeating print footer."""
     def esc(s):
         return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    kpi_html = "".join(
-        f"<div class='kpi'><div class='kpi-l'>{esc(l)}</div>"
-        f"<div class='kpi-v'>{esc(v)}</div></div>" for l, v in ctx.get("kpis", []))
+
+    def ek(k):
+        ds = []
+        for tag in ("qoq", "yoy"):
+            dv = k.get(tag)
+            if dv:
+                ds.append(f"{tag.upper()} <span class='{dv[1]}'>{esc(dv[0])}</span>")
+        if k.get("pct") is not None:
+            ds.append(f"{esc(_ordinal(k['pct']))} pct")
+        return (f"<div class='ek'><div class='ek-l'>{esc(k['label'])}</div>"
+                f"<div class='ek-v'>{esc(k['value'])}</div>"
+                f"<div class='ek-d'>{' &middot; '.join(ds)}</div></div>")
+    ek_html = "".join(ek(k) for k in ctx.get("kpis", []))
+
+    bull = "".join(f"<li>{esc(b)}</li>" for b in ctx.get("narrative", []))
+    narrative_html = f"<ul class='bullets'>{bull}</ul>" if bull else ""
+
     rrows = []
     for lbl, cu_v, peer_v, better in ctx.get("ratios", []):
         mark = ("" if better is None
@@ -2435,15 +2509,17 @@ def board_packet_html(ctx):
                 else "<span class='dn'>&#9660;</span>")
         rrows.append(f"<tr><td>{esc(lbl)}</td><td class='num'>{esc(cu_v)} {mark}</td>"
                      f"<td class='num pa'>{esc(peer_v)}</td></tr>")
-    ratio_html = "".join(rrows)
+    ratio_html = ("<table class='tbl'><thead><tr><th>Ratio</th><th class='num'>This CU</th>"
+                  "<th class='num'>Peer median</th></tr></thead><tbody>"
+                  + "".join(rrows) + "</tbody></table>")
+
     b = ctx.get("bridge")
     if b:
         brows = [f"<tr class='br-start'><td>{esc(b['start'][0])}</td>"
                  f"<td class='num'>{b['start'][1]:.2f}%</td></tr>"]
         for lbl, val in b["steps"]:
             cls = "pos" if val >= 0 else "neg"
-            brows.append(f"<tr><td>{esc(lbl)}</td>"
-                         f"<td class='num {cls}'>{val:+.2f}</td></tr>")
+            brows.append(f"<tr><td>{esc(lbl)}</td><td class='num {cls}'>{val:+.2f}</td></tr>")
         brows.append(f"<tr class='br-end'><td>{esc(b['end'][0])}</td>"
                      f"<td class='num'>{b['end'][1]:.2f}%</td></tr>")
         bridge_html = ("<table class='tbl'><thead><tr><th>ROA driver vs peer avg</th>"
@@ -2451,31 +2527,138 @@ def board_packet_html(ctx):
                        + "".join(brows) + "</tbody></table>")
     else:
         bridge_html = "<p class='muted'>ROA bridge unavailable for this period.</p>"
+
+    ys = ctx.get("ys")
+    if ys:
+        ys_rows = [("Yield on loans", "yl"), ("Yield on investments", "yi"),
+                   ("Yield on earning assets", "yea"), ("Cost of funds", "cof"),
+                   ("Net interest spread", "spread"), ("Net interest margin", "nim")]
+        yh = "".join(
+            f"<tr><td>{esc(l)}</td><td class='num'>"
+            + (f"{ys[k]:.2f}%" if isinstance(ys.get(k), (int, float)) and ys[k] == ys[k]
+               else "&mdash;") + "</td></tr>" for l, k in ys_rows)
+        ys_html = f"<table class='tbl'><tbody>{yh}</tbody></table>"
+    else:
+        ys_html = "<p class='muted'>Yield/spread decomposition unavailable.</p>"
+
+    def mix_tbl(m, title):
+        if not m:
+            return ""
+        cats, cus, pes = m
+        rows = "".join(
+            f"<tr><td>{esc(c)}</td><td class='num'>{cus.get(c, 0):.1f}%</td>"
+            f"<td class='num pa'>{pes.get(c, 0):.1f}%</td>"
+            f"<td class='num'>{cus.get(c, 0) - pes.get(c, 0):+.1f}</td></tr>" for c in cats)
+        return (f"<h3>{esc(title)}</h3><table class='tbl'><thead><tr><th>Category</th>"
+                "<th class='num'>This CU</th><th class='num'>Peer band</th>"
+                f"<th class='num'>Gap (pp)</th></tr></thead><tbody>{rows}</tbody></table>")
+    mix_html = (mix_tbl(ctx.get("loan_mix"), "Loan mix")
+                + mix_tbl(ctx.get("deposit_mix"), "Deposit mix"))
+    if not mix_html:
+        mix_html = "<p class='muted'>Composition data unavailable.</p>"
+
     sp_rows = []
     for lbl, vals, _k in ctx.get("sparks", []):
         cur = next((v for v in reversed(vals) if isinstance(v, (int, float)) and v == v), None)
         cur_s = f"{cur:.2f}%" if cur is not None else "&mdash;"
-        sv = _spark_svg(vals)
-        sp_rows.append(f"<tr><td>{esc(lbl)}</td><td>{sv}</td>"
+        sp_rows.append(f"<tr><td>{esc(lbl)}</td><td>{_spark_svg(vals)}</td>"
                        f"<td class='num'>{cur_s}</td></tr>")
     spark_html = ("<table class='tbl'><tbody>" + "".join(sp_rows) + "</tbody></table>"
                   if sp_rows else "<p class='muted'>Not enough history for trend lines.</p>")
-    head = ('<!DOCTYPE html><html><head><meta charset="utf-8"><title>Board packet &mdash; '
-            + esc(ctx.get("name", "")) + "</title>" + BOARD_PACKET_CSS + "</head>")
+
+    twins = ctx.get("twins", [])
+    twins_html = ("<h3>Statistical twins</h3><p class='muted'>" + esc(", ".join(twins))
+                  + "</p>") if twins else ""
+
+    name = esc(ctx.get("name", ""))
+    charter = esc(ctx.get("charter", ""))
+    state = esc(ctx.get("state", ""))
+    band = esc(ctx.get("band", ""))
+    plabel = esc(ctx.get("period_label", ctx.get("cycle", "")))
+    gen = esc(ctx.get("generated", ""))
+    stars = esc(ctx.get("stars", ""))
+    score = ctx.get("score")
+    score_s = (f"{score:.0f}/100" if isinstance(score, (int, float)) and score == score
+               else "—")
+    peer_n = ctx.get("peer_n", 0)
+
+    def opt(frag, fallback):
+        return frag if frag else f"<p class='muted'>{fallback}</p>"
+
+    head = ('<!DOCTYPE html><html><head><meta charset="utf-8"><title>Board package &mdash; '
+            + name + "</title>" + BOARD_PACKET_CSS + FPR_FS_CSS + PEER_BAR_CSS
+            + PACKAGE_EXTRA_CSS + "</head>")
+
     body = f"""<body>
 <button class="printbtn" onclick="window.print()">Print / Save as PDF</button>
 <div class="page">
-  <h1>{esc(ctx.get('name', ''))}</h1>
-  <div class="sub">Charter #{esc(ctx.get('charter', ''))} &middot; {esc(ctx.get('state', ''))} &middot; Peer group (asset band): {esc(ctx.get('band', ''))} &middot; As of {esc(ctx.get('cycle', ''))} &middot; Generated {esc(ctx.get('generated', ''))}</div>
-  <div class="kpis">{kpi_html}</div>
-  <h2>Key ratios vs peer median</h2>
-  <table class="tbl"><thead><tr><th>Ratio</th><th class="num">This CU</th><th class="num">Peer median</th></tr></thead><tbody>{ratio_html}</tbody></table>
-  <h2>ROA bridge &mdash; drivers of the gap to {ctx.get('peer_n', 0)} peers</h2>
-  {bridge_html}
-  <h2>Trends</h2>
-  {spark_html}
-  <div class="foot">Source: NCUA 5300 Call Report. &#9650;/&#9660; = better/worse than the peer median (direction-adjusted). Ratios and the ROA bridge use the NCUA FPR average-balance basis. Informational only &mdash; not investment or audit advice.</div>
-</div></body></html>"""
+
+  <section class="pg first cover">
+    <div class="big">{name}</div>
+    <div class="mid">Board Financial Package</div>
+    <div class="tag">Charter #{charter} &middot; {state} &middot; Peer group (asset band): {band}<br>
+      Reporting period: {plabel} &middot; Generated {gen}<br>
+      <span class="confid">Confidential &mdash; prepared for Board use</span></div>
+  </section>
+
+  <section class="pg">
+    <h2>Executive summary</h2>
+    <div class="exec-kpis">{ek_html}</div>
+    <p style="margin:2px 0 10px"><strong>Composite score:</strong> {score_s}
+       &nbsp; <span class="stars">{stars}</span></p>
+    {narrative_html}
+    <h3>Headline ratios vs peer median</h3>
+    {ratio_html}
+  </section>
+
+  <section class="pg">
+    <h2>Financial statements</h2>
+    {ctx.get("meta_html") or ""}
+    {opt(ctx.get("financials_html"), "Financial statements unavailable for this selection.")}
+  </section>
+
+  <section class="pg">
+    <h2>Key ratios vs peer</h2>
+    {opt(ctx.get("key_ratios_html"), "Key ratios unavailable for this selection.")}
+  </section>
+
+  <section class="pg">
+    <h2>Capital, asset quality, earnings &amp; ALM (historical)</h2>
+    {opt(ctx.get("hist_ratios_html"), "Historical ratios unavailable for this selection.")}
+  </section>
+
+  <section class="pg">
+    <h2>Earnings &amp; margin</h2>
+    <h3>ROA bridge &mdash; drivers of the gap to {peer_n} peers</h3>
+    {bridge_html}
+    <h3>Yield &amp; spread decomposition</h3>
+    {ys_html}
+  </section>
+
+  <section class="pg">
+    <h2>Loan &amp; deposit franchise</h2>
+    {mix_html}
+  </section>
+
+  <section class="pg">
+    <h2>Peer benchmarking</h2>
+    {opt(ctx.get("peer_bars_html"), "Peer benchmarking unavailable.")}
+    {twins_html}
+  </section>
+
+  <section class="pg">
+    <h2>Trend appendix</h2>
+    {spark_html}
+    <div class="foot">Source: NCUA 5300 Call Report. &#9650;/&#9660; = better/worse than the
+      peer median (direction-adjusted). Ratios, the ROA bridge and yield/spread use the NCUA
+      FPR average-balance basis. Peer figures are the asset-band group. Informational only
+      &mdash; not investment, audit, or regulatory advice.</div>
+  </section>
+
+</div>
+<div class="runfoot">{name} &middot; Charter #{charter} &middot; {plabel}
+  &middot; <span class="confid">Confidential — Board use</span></div>
+</body></html>"""
     return head + body
 
 
@@ -3107,59 +3290,181 @@ elif page == "ROA Bridge":
 elif page == "Board Packet":
     import datetime
     import streamlit.components.v1 as components
-    st.subheader("Board packet — printable one-pager")
+    st.subheader("Board package — institutional multi-page report")
     cu_keys = list(ALL_LABELS)
     if not cu_keys:
         st.info("No credit unions available for this cycle.")
     else:
+        c1, c2 = st.columns([3, 1])
         default_cu = next((c for c in cu_keys if str(c) == "61790"), cu_keys[0])
-        cu_pick = st.selectbox("Credit union", cu_keys,
+        cu_pick = c1.selectbox("Credit union", cu_keys,
                                index=cu_keys.index(default_cu),
                                format_func=lambda c: ALL_LABELS[c])
+        span = c2.radio("Period", ["Quarters", "Years"], horizontal=True, key="bp_span")
         try:
+            years = span == "Years"
+            mode = "Years" if years else "Quarters"
             row = mt[mt.cu == cu_pick].iloc[0]
             band = row.band
             peers = mt[mt.band == band]
-            kpis = [("Assets", money(row.assets)),
-                    ("Members", f"{row.members:,.0f}" if pd.notna(row.members) else "—"),
-                    ("Net worth ratio", fmt("nw_ratio", row.nw_ratio)),
-                    ("ROA", fmt("roa", row.roa)),
-                    ("Composite score",
-                     f"{row.score:.0f}/100" if pd.notna(row.score) else "—")]
+            ts = cu_timeseries(cu_pick, sig)
+            prev_cy = prior_cycle(cycle)
+            yoy_cy = f"{int(cycle[:4]) - 1}-{cycle[-2:]}"
+
+            def _val_at(cy, key):
+                if not ts.empty and cy in ts.index and key in ts.columns:
+                    x = ts.loc[cy, key]
+                    return float(x) if pd.notna(x) else None
+                return None
+
+            def _delta(key, cur, cy, kind, higher_better=True):
+                base = _val_at(cy, key)
+                if base is None or pd.isna(cur) or (kind == "pct" and base == 0):
+                    return None
+                if kind == "pct":
+                    d = (cur / base - 1) * 100
+                    txt = f"{d:+.1f}%"
+                else:
+                    d = cur - base
+                    txt = f"{d:+.2f} pp"
+                good = (d >= 0) if higher_better else (d <= 0)
+                return (txt, "pos" if good else "neg")
+
+            def _pct_rank(key, higher_better=True):
+                s = peers[key].dropna()
+                v = row[key]
+                if pd.isna(v) or len(s) < 3:
+                    return None
+                p = (s < v).mean() * 100
+                return int(round(p if higher_better else 100 - p))
+
+            kpis = [
+                {"label": "Assets", "value": money(row.assets),
+                 "qoq": _delta("assets", row.assets, prev_cy, "pct"),
+                 "yoy": _delta("assets", row.assets, yoy_cy, "pct"),
+                 "pct": _pct_rank("assets")},
+                {"label": "Members",
+                 "value": f"{row.members:,.0f}" if pd.notna(row.members) else "—",
+                 "qoq": _delta("members", row.members, prev_cy, "pct"),
+                 "yoy": _delta("members", row.members, yoy_cy, "pct"),
+                 "pct": _pct_rank("members")},
+                {"label": "Net worth ratio", "value": fmt("nw_ratio", row.nw_ratio),
+                 "qoq": _delta("nw_ratio", row.nw_ratio, prev_cy, "pp"),
+                 "yoy": _delta("nw_ratio", row.nw_ratio, yoy_cy, "pp"),
+                 "pct": _pct_rank("nw_ratio")},
+                {"label": "ROA", "value": fmt("roa", row.roa),
+                 "qoq": _delta("roa", row.roa, prev_cy, "pp"),
+                 "yoy": _delta("roa", row.roa, yoy_cy, "pp"),
+                 "pct": _pct_rank("roa")},
+            ]
+
+            def _fact(key, label):
+                v, med = row[key], peers[key].median()
+                hb = META[key][2] != "low"
+                better = (((v >= med) if hb else (v <= med))
+                          if (pd.notna(v) and pd.notna(med)) else None)
+                q = _delta(key, v, prev_cy, "pp", hb)
+                y = _delta(key, v, yoy_cy, "pp", hb)
+                return {"label": label, "value_str": fmt(key, v),
+                        "qoq_str": q[0] if q else None, "yoy_str": y[0] if y else None,
+                        "pct": _pct_rank(key, hb),
+                        "peer_str": fmt(key, med) if pd.notna(med) else None,
+                        "better": better}
+            narrative = _packet_narrative(
+                [_fact("nw_ratio", "Net worth ratio"), _fact("roa", "ROA"),
+                 _fact("efficiency", "Efficiency ratio"), _fact("delinquency", "Delinquency"),
+                 _fact("nco", "Net charge-offs"), _fact("lts", "Loan-to-share")], 6)
+
             ratios = []
             for k in ["roa", "roe", "nim", "efficiency", "nw_ratio", "lts",
                       "delinquency", "nco"]:
                 lbl, _, dirn = META[k]
                 v, med = row[k], peers[k].median()
-                better = None
-                if pd.notna(v) and pd.notna(med):
-                    better = (v >= med) if dirn != "low" else (v <= med)
-                ratios.append((lbl, fmt(k, v), fmt(k, med) if pd.notna(med) else "—",
-                               better))
+                better = (((v >= med) if dirn != "low" else (v <= med))
+                          if (pd.notna(v) and pd.notna(med)) else None)
+                ratios.append((lbl, fmt(k, v), fmt(k, med) if pd.notna(med) else "—", better))
+
             subj = _fpr_ratio_dict(cu_statement_raw(cu_pick, sig), cycle, sig)
             pavg, p_n = fpr_peer_avg(band, cycle, sig)
             bridge = roa_bridge_steps(subj, pavg)
-            ts = cu_timeseries(cu_pick, sig)
-            hist = ts.sort_index().tail(8) if not ts.empty else ts
-            sparks = [(META[k][0], list(hist[k]), k)
-                      for k in ["roa", "nw_ratio", "efficiency"]
-                      if not hist.empty and k in hist.columns]
-            ctx = dict(name=ALL_LABELS[cu_pick].split(" (#")[0], charter=str(cu_pick),
-                       state=row.state, band=band, cycle=cycle,
-                       generated=datetime.date.today().isoformat(),
-                       kpis=kpis, ratios=ratios, bridge=bridge, sparks=sparks,
-                       peer_n=p_n or len(peers))
+            yp = ys_point(cu_pick, cycle, sig)
+            ys_dict = yp[0] if yp else None
+
+            def _mix_pair(srcname):
+                parts, total_code, resid = MIX_SOURCES[srcname]
+                cu_mf = mix_frame(acct_values(cu_pick, cycle, sig), parts, total_code, resid)
+                pm, _n = peer_mix_frame(band, cycle, srcname, sig)
+                if cu_mf.empty or pm.empty:
+                    return None
+                cu_share = dict(zip(cu_mf["Category"], cu_mf["Share"]))
+                pe_share = dict(zip(pm["Category"], pm["Share"]))
+                cats = list(dict.fromkeys(list(cu_share) + list(pe_share)))
+                cats.sort(key=lambda k: (k == resid or k.startswith("Other"),
+                                         -cu_share.get(k, 0)))
+                return (cats, cu_share, pe_share)
+            loan_mix, deposit_mix = _mix_pair("Loan mix"), _mix_pair("Deposit mix")
+
+            pb_items = []
+            for k in ["roa", "roe", "nim", "efficiency", "nw_ratio", "lts",
+                      "delinquency", "nco"]:
+                lbl, _, dirn = META[k]
+                v, s = row[k], peers[k].dropna()
+                if pd.isna(v) or len(s) < 2:
+                    pb_items.append({"label": lbl, "value": fmt(k, v), "median": "—",
+                                     "stats": None})
+                    continue
+                med = s.median()
+                better = (v >= med) if dirn != "low" else (v <= med)
+                lo, hi = float(s.quantile(.05)), float(s.quantile(.95))
+                if hi <= lo:
+                    lo, hi = float(s.min()), float(s.max())
+                pb_items.append({"label": lbl, "value": fmt(k, v), "median": fmt(k, med),
+                                 "stats": {"lo": lo, "hi": hi, "min": float(s.min()),
+                                           "max": float(s.max()), "p25": float(s.quantile(.25)),
+                                           "p75": float(s.quantile(.75)), "median": float(med),
+                                           "value": float(v), "better": bool(better)}})
+            pbars = peer_bars_html(pb_items)
+            twins = [ALL_LABELS[c].split(" (#")[0]
+                     for c in find_twins(cu_pick, cycle, sig, 12) if c in ALL_LABELS]
+
+            hist_ts = ts.sort_index().tail(16) if not ts.empty else ts
+            sparks = [(META[k][0], list(hist_ts[k]), k)
+                      for k in ["roa", "roe", "nim", "efficiency", "nw_ratio", "lts",
+                                "delinquency", "nco"]
+                      if not hist_ts.empty and k in hist_ts.columns]
+
+            n_hist = 10 if years else 13
+            fin_html = fpr_summary_html(cu_pick, mode, cycle, sig, 5) or ""
+            key_html = (fpr_ratio_html(cu_pick, FPR_KEY_SECTIONS, mode, cycle, sig, band,
+                                       5, peer=True)[0] or "")
+            hist_html = (fpr_ratio_html(cu_pick, FPR_HIST_SECTIONS, mode, cycle, sig, band,
+                                        n_hist, peer=True)[0] or "")
+            sc, stv = row.get("score"), row.get("stars")
+            ctx = dict(
+                name=ALL_LABELS[cu_pick].split(" (#")[0], charter=str(cu_pick),
+                state=row.state, band=band, cycle=cycle,
+                period_label=f"{'Year' if years else 'Quarter'} ending {cycle}",
+                generated=datetime.date.today().isoformat(),
+                kpis=kpis, narrative=narrative, ratios=ratios, bridge=bridge, ys=ys_dict,
+                loan_mix=loan_mix, deposit_mix=deposit_mix, sparks=sparks,
+                peer_bars_html=pbars, twins=twins, meta_html=fpr_meta_html(cu_pick, cycle, sig),
+                financials_html=fin_html, key_ratios_html=key_html, hist_ratios_html=hist_html,
+                score=float(sc) if (sc is not None and pd.notna(sc)) else None,
+                stars=stars_str(stv) if (stv is not None and pd.notna(stv)) else "",
+                peer_n=p_n or len(peers))
             html = board_packet_html(ctx)
-            st.download_button("⬇  Download board packet (HTML → Print to PDF)",
+            st.download_button("⬇  Download board package (HTML → Print to PDF)",
                                data=html,
-                               file_name=f"board_packet_{cu_pick}_{cycle}.html",
+                               file_name=f"board_package_{cu_pick}_{cycle}.html",
                                mime="text/html")
             st.caption("Open the downloaded file and use your browser's Print → Save as "
-                       "PDF. The on-screen Print button is hidden in the printout.")
+                       "PDF — sections are page-break isolated and a confidential footer "
+                       "repeats on each printed page. Automatic page numbers aren't "
+                       "reliable through browser print, so they're omitted.")
             st.markdown("---")
-            components.html(html, height=900, scrolling=True)
+            components.html(html, height=1000, scrolling=True)
         except Exception as exc:
-            st.info(f"Board packet unavailable ({exc}).")
+            st.info(f"Board package unavailable ({exc}).")
 
 # ============================================================ COMPARE
 elif page == "Compare":
