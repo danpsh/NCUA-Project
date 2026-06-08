@@ -2587,11 +2587,11 @@ if page == "Profile":
             h[4].metric("Peer Score",
                         f"{row.score:.0f}/100" if pd.notna(row.score) else "—",
                         help=f"{lens} percentile rank within the {row.band} asset band; "
-                             "50 = band median, 75+ = top quartile.")
+                             "50 = band median, 80+ = ★★★★★.")
             st.markdown(
                 f"<div style='font-size:1.6rem;line-height:1.1'>{stars_str(row.stars)}"
                 "</div>", unsafe_allow_html=True)
-            cap = f"{lens} peer score vs {row.band} peers — 50 = band median, 75+ = top quartile."
+            cap = f"{lens} peer score vs {row.band} peers — 50 = band median, 80+ = ★★★★★."
             if prev_row is not None:
                 cap += f"  ·  ▲▼ deltas vs prior quarter ({prev_cy})."
             st.caption(cap)
