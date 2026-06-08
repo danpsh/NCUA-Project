@@ -2354,7 +2354,7 @@ _qp = st.query_params
 if _qp.get("view") in NAV:
     st.session_state["nav_page"] = _qp.get("view")
 if "view" in _qp:
-    del st.query_params["view"]   # clear only "view"; Profile reads "cu" directly
+    del st.query_params["view"]
 
 st.sidebar.markdown("""<style>
 section[data-testid="stSidebar"] div[data-testid="stButton"]{margin:1px 0}
@@ -2497,22 +2497,20 @@ def screen_filters(df, key, default_top=100, show_top=True):
 
 # ============================================================ PROFILE
 if page == "Profile":
-    # Read CU from URL directly (reliable) or session fallback
-    _pend_raw = (st.query_params.get("cu")
-                 or st.session_state.pop("profile_pending_cu", None))
-    if _pend_raw:
-        if "cu" in st.query_params:
-            del st.query_params["cu"]  # clear from URL after reading
+    # Deep-link: set session state, clear URL, rerun.
+    # session_state survives st.rerun(); URL params do not.
+    _cu_url = st.query_params.get("cu")
+    if _cu_url:
         try:
-            _pend = int(_pend_raw)
-        except (TypeError, ValueError):
-            _pend = None
-        if _pend is not None:
+            _pend = int(_cu_url)
             _phit = mt[mt.cu == _pend]
             if not _phit.empty:
                 st.session_state["profile_search"] = _phit.iloc[0].cu_name
                 st.session_state["profile_pick"] = _pend
-    st.session_state.setdefault("profile_search", "BluCurrent")
+        except (TypeError, ValueError):
+            pass
+        st.query_params.clear()
+        st.rerun()
     _sq, _ = st.columns([1, 2])
     query = _sq.text_input("Search a credit union by name", key="profile_search",
                            placeholder="Search by name…",
