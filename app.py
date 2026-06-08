@@ -80,6 +80,9 @@ SCORE_LENSES = {
     ],
 }
 
+SCORE_MIN_COVERAGE = 0.60   # composite assigned only if ≥60% of the lens weight is present
+RANK_MIN_ASSETS = 25e6      # Rankings screen floor — tiny books yield unstable ratios
+
 BANDS = [
     (0, 10e6, "< $10M"), (10e6, 50e6, "$10M–50M"), (50e6, 100e6, "$50M–100M"),
     (100e6, 250e6, "$100M–250M"), (250e6, 500e6, "$250M–500M"),
@@ -836,7 +839,7 @@ def enriched_table(cycle, basis, lens, cycle_sig):
         contrib = z.mask(is_acq) if key.endswith("_growth") else z   # no merger-growth credit
         acc = acc + contrib.fillna(0) * w
         wsum = wsum + contrib.notna().astype(float) * w
-    df["score_z"] = (acc / wsum).where(wsum > 0)          # weighted composite z
+    df["score_z"] = (acc / wsum).where(wsum >= SCORE_MIN_COVERAGE)  # need ≥60% weight present
     df["score"] = (50 + 30 * df["score_z"]).clip(0, 100)  # 50 = peer average
     df["stars"] = df["score_z"].apply(stars_from_z)
     return df
@@ -3979,6 +3982,10 @@ elif page == "Rankings":
     all_states = sorted(s for s in mt.state.unique() if s)
     sel_states = f1.multiselect("State(s)", all_states, default=[])
     sel_bands = f2.multiselect("Asset size", [b[2] for b in BANDS], default=[])
+    include_small = st.checkbox(
+        f"Include credit unions under ${RANK_MIN_ASSETS / 1e6:.0f}M in assets "
+        "(off by default — tiny books produce unstable ratios and skew the ranking)",
+        value=False)
     rankable = ["score"] + [k for k, _, _, _ in METRICS]
     g1, g2 = st.columns([2, 1])
     rank_key = g1.selectbox("Rank by", rankable,
@@ -3997,6 +4004,8 @@ elif page == "Rankings":
         st.caption("Heads-up: extreme growth usually reflects a merger/acquisition — "
                    "tick the box above to exclude those.")
     view = mt.copy()
+    if not include_small:
+        view = view[view.assets >= RANK_MIN_ASSETS]
     if sel_states:
         view = view[view.state.isin(sel_states)]
     if sel_bands:
@@ -4043,7 +4052,8 @@ elif page == "Rankings":
         disp["Merger"] = [merger_tag(c, acq, inf) for c in view.cu.values]
     disp.insert(0, "Rank", range(1, len(disp) + 1))
     colcfg["Rank"] = st.column_config.NumberColumn("Rank", format="%d", width="small")
-    st.caption(f"All {len(view):,} credit unions shown (of {len(mt):,} total), {cycle} — "
+    floor_note = "" if include_small else f" ≥ ${RANK_MIN_ASSETS / 1e6:.0f}M assets"
+    st.caption(f"{len(view):,} credit unions shown{floor_note} (of {len(mt):,} total), {cycle} — "
                f"initially ranked by **{META[rank_key][0]}**. Click any column header to "
                "re-rank the whole table by that measure (the Rank column reflects the "
                "“Rank by” choice).")
