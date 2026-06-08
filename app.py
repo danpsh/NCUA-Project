@@ -2645,42 +2645,22 @@ if page == "Profile":
                 hist = score_history(cu, basis, lens, cycle, sig)
                 if len(hist) > 1:
                     labels = [c[:4] if c.endswith("-12") else c for c in hist.index]
-                    chart_df = pd.DataFrame({"Peer Score": hist.score.values}, index=labels)
-                    st.line_chart(chart_df, y="Peer Score")
-                    htbl = pd.DataFrame({
-                        "Period": labels,
-                        "Peer Score": [f"{v:.0f}/100" for v in hist.score],
-                        "Stars": [stars_str(v) for v in hist.stars],
-                    })
-                    st.dataframe(htbl, use_container_width=True, hide_index=True)
-                    st.caption(f"{lens} peer score at each year-end (plus the selected "
-                               "quarter). Score = percentile rank within the asset band "
-                               "(50 = band median). History follows the charter across conversions.")
+                    _hchart, _htbl = st.columns([3, 1])
+                    with _hchart:
+                        chart_df = pd.DataFrame({"Peer Score": hist.score.values}, index=labels)
+                        st.line_chart(chart_df, y="Peer Score")
+                    with _htbl:
+                        htbl = pd.DataFrame({
+                            "Year":  labels,
+                            "Score": [f"{v:.0f}" for v in hist.score],
+                            "Stars": [stars_str(v) for v in hist.stars],
+                        })
+                        st.dataframe(htbl, use_container_width=True, hide_index=True,
+                                     height=len(htbl) * 35 + 38)
+                    st.caption(f"{lens} peer score at each year-end. "
+                               "50 = band median. History follows the charter across conversions.")
                 else:
                     st.caption("Composite history needs more than one period of data.")
-
-                st.divider()
-                sc = pd.DataFrame(
-                    {"Value": {META[k][0]: fmt(k, row[k]) for k, _, _, _ in METRICS}})
-                st.download_button(
-                    "Download scorecard (Excel)",
-                    to_excel_bytes({"Scorecard": sc}),
-                    file_name=f"{row.cu_name}_{cycle}_scorecard.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                )
-                with st.expander("Efficiency Ratio Breakdown"):
-                    nii = row.int_income - row.int_expense
-                    rev = nii + row.non_int_income
-                    bd = pd.DataFrame([
-                        ("Total Interest Income", money(row.int_income)),
-                        ("− Total Interest Expense", money(row.int_expense)),
-                        ("= Net Interest Income", money(nii)),
-                        ("+ Non-Interest Income", money(row.non_int_income)),
-                        ("= Revenue (denominator)", money(rev)),
-                        ("Operating Expense (numerator)", money(row.opex)),
-                        ("Efficiency Ratio", pct(row.efficiency)),
-                    ], columns=["Component", "Value"])
-                    st.dataframe(bd, use_container_width=True, hide_index=True)
 
             # ===================================================== FINANCIALS
             with tab_fin:
