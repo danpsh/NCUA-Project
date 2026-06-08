@@ -882,8 +882,10 @@ def score_history(cu, basis, lens, cycle, cycle_sig):
         if r.empty or pd.isna(r.iloc[0].score):
             continue
         s = float(r.iloc[0].score)
+        band = r.iloc[0].band
+        band_peers = et[et.band == band].score
         rows.append({"cycle": c, "score": s, "stars": r.iloc[0].stars,
-                     "pct": float((et.score < s).mean() * 100)})
+                     "pct": float((band_peers < s).mean() * 100)})
     return pd.DataFrame(rows).set_index("cycle") if rows else pd.DataFrame()
 
 
@@ -2727,11 +2729,11 @@ if page == "Profile":
                         "Period": labels,
                         "Composite Score": [f"{v:.0f}" for v in hist.score],
                         "Stars": [stars_str(v) for v in hist.stars],
-                        "Percentile (all CUs)": [f"{v:.0f}%" for v in hist.pct],
+                        "Percentile (band)": [f"{v:.0f}%" for v in hist.pct],
                     })
                     st.dataframe(htbl, use_container_width=True, hide_index=True)
                     st.caption(f"{lens} composite at each year-end (plus the selected "
-                               "quarter). Percentile = share of all credit unions outscored "
+                               "quarter). Percentile = share of asset-band peers outscored "
                                "that period. History follows the charter across conversions.")
                 else:
                     st.caption("Composite history needs more than one period of data.")
