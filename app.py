@@ -3497,10 +3497,26 @@ elif page == "Chart":
 
         if disp.startswith("Snapshot"):
             with tab_data:
-                period = st.selectbox("Period", in_range, index=len(in_range) - 1,
-                                      format_func=lambda c: _period_label(c, span),
-                                      key="comp_period")
-                shape = st.radio("Shape", ["Donut", "Pie"], horizontal=True)
+                _cp, _cs = st.columns(2)
+                period = _cp.selectbox("Period", in_range, index=len(in_range) - 1,
+                                       format_func=lambda c: _period_label(c, span),
+                                       key="comp_period")
+                shape = _cs.radio("Chart type",
+                                  ["Donut", "Pie", "Horizontal bar"],
+                                  horizontal=True, key="comp_shape")
+                _cl, _cpr, _clg = st.columns(3)
+                label_mode = _cl.radio("Labels",
+                                        ["Name + %", "% only", "Name only", "None"],
+                                        horizontal=True, key="comp_labels")
+                precision  = _cpr.radio("Precision", ["0 dec", "1 dec", "2 dec"],
+                                         horizontal=True, index=1, key="comp_prec")
+                legend_pos = _clg.radio("Legend", ["Right", "Bottom", "Off"],
+                                         horizontal=True, key="comp_legend_pos")
+                other_thresh = st.slider("Combine slices below",
+                                         0.0, 10.0, 0.0, 0.5,
+                                         format="%.1f%%", key="comp_other",
+                                         help="Fold all slices smaller than this "
+                                              "share into the residual category.")
             v = acct_values(comp_cu, period, sig)
             mf = mix_frame(v, parts, total_code, resid)
             if mf.empty:
@@ -3512,23 +3528,89 @@ elif page == "Chart":
                                           value=f"{cu_name} — {src.lower()} "
                                                 f"({_period_label(period, span)})",
                                           key=f"comp_t_{src}_{comp_cu}_{period}")
+                # --- Combine small slices into residual ---
+                if other_thresh > 0:
+                    _mask = (mf["Share"] < other_thresh) & (mf["Category"] != resid)
+                    if _mask.sum() >= 1 and not _mask.all():
+                        _small = mf[_mask]
+                        _kept  = mf[~_mask].copy()
+                        _e_amt = _small["Amount ($M)"].sum()
+                        _e_shr = _small["Share"].sum()
+                        _rm    = _kept["Category"] == resid
+                        if _rm.any():
+                            _kept.loc[_rm, "Amount ($M)"] += _e_amt
+                            _kept.loc[_rm, "Share"] += _e_shr
+                        else:
+                            _kept = pd.concat([_kept, pd.DataFrame([{
+                                "Category": resid,
+                                "Amount ($M)": _e_amt,
+                                "Share": _e_shr}])], ignore_index=True)
+                        mf = _kept
+                # --- Precision & legend helpers ---
+                _dec_n   = {"0 dec": 0, "1 dec": 1, "2 dec": 2}[precision]
+                _dec_sp  = f":.{_dec_n}%"
+                if legend_pos == "Right":
+                    _leg_kw = dict(showlegend=True,
+                                   legend=dict(orientation="v", x=1.02, y=0.5))
+                elif legend_pos == "Bottom":
+                    _leg_kw = dict(showlegend=True,
+                                   legend=dict(orientation="h", x=0.5,
+                                               xanchor="center", y=-0.12))
+                else:
+                    _leg_kw = dict(showlegend=False)
                 colors = [cat_pal[i % len(cat_pal)] for i in range(len(mf))]
-                fig = go.Figure(go.Pie(
-                    labels=mf["Category"].tolist(), values=mf["Amount ($M)"].tolist(),
-                    hole=0.55 if shape == "Donut" else 0.0, sort=False,
-                    direction="clockwise", marker=dict(colors=colors),
-                    texttemplate="%{label}<br>%{percent}",
-                    hovertemplate="%{label}: $%{value:.1f}M (%{percent})<extra></extra>"))
+                if shape == "Horizontal bar":
+                    _mfs = mf.sort_values("Share", ascending=True).reset_index(drop=True)
+                    _bar_clr = [cat_pal[i % len(cat_pal)] for i in range(len(_mfs))]
+                    _bar_txt = ([f"{v:.{_dec_n}f}%" for v in _mfs["Share"]]
+                                if label_mode != "None" else None)
+                    fig = go.Figure(go.Bar(
+                        y=_mfs["Category"].tolist(),
+                        x=_mfs["Share"].tolist(),
+                        orientation="h",
+                        marker_color=_bar_clr,
+                        text=_bar_txt,
+                        textposition="outside",
+                        hovertemplate="%{y}: %{x:." + str(_dec_n) + "f}%<extra></extra>"))
+                    fig.update_layout(
+                        xaxis=dict(title="Share of total", ticksuffix="%",
+                                   range=[0, _mfs["Share"].max() * 1.2]),
+                        yaxis=dict(automargin=True),
+                        **_leg_kw)
+                else:
+                    # Label template for pie / donut
+                    if label_mode == "Name + %":
+                        _tmpl = f"%{{label}}<br>%{{percent{_dec_sp}}}"
+                    elif label_mode == "% only":
+                        _tmpl = f"%{{percent{_dec_sp}}}"
+                    elif label_mode == "Name only":
+                        _tmpl = "%{label}"
+                    else:
+                        _tmpl = ""
+                    fig = go.Figure(go.Pie(
+                        labels=mf["Category"].tolist(),
+                        values=mf["Amount ($M)"].tolist(),
+                        hole=0.55 if shape == "Donut" else 0.0,
+                        sort=False, direction="clockwise",
+                        marker=dict(colors=colors),
+                        texttemplate=_tmpl,
+                        textposition=("none" if label_mode == "None" else "auto"),
+                        hovertemplate="%{label}: $%{value:.1f}M "
+                                      f"(%{{percent{_dec_sp}}})<extra></extra>"))
+                    fig.update_layout(**_leg_kw)
                 fig.update_layout(
-                    title=dict(text=title, x=TITLE_X[0], xanchor=TITLE_X[1], font=dict(size=18),
+                    title=dict(text=title, x=TITLE_X[0], xanchor=TITLE_X[1],
+                               font=dict(size=18),
                                subtitle=dict(text=subtitle) if subtitle else None),
-                    height=height, showlegend=legend_on,
-                    legend=dict(orientation="v", x=1.02, y=0.5),
-                    margin=dict(l=10, r=10, t=64 if subtitle else 48,
+                    height=height,
+                    margin=dict(l=10,
+                                r=160 if legend_pos == "Right" else 10,
+                                t=64 if subtitle else 48,
                                 b=30 + (26 if source else 0)))
                 if source:
-                    fig.add_annotation(text=source, xref="paper", yref="paper", x=0, y=-0.02,
-                                       showarrow=False, xanchor="left", yanchor="top",
+                    fig.add_annotation(text=source, xref="paper", yref="paper",
+                                       x=0, y=-0.02, showarrow=False,
+                                       xanchor="left", yanchor="top",
                                        font=dict(size=11, color="#888"))
                 chart_slot.plotly_chart(fig, use_container_width=True,
                                         config=export_config(title))
