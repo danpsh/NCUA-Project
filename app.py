@@ -2563,8 +2563,8 @@ if page == "Profile":
                 st.dataframe(score_breakdown(row, weights), use_container_width=True,
                              hide_index=True)
 
-            tab_ov, tab_fin, tab_tr, tab_peer, tab_mrg = st.tabs(
-                ["Overview", "Financials", "Trends", "Peers", "Mergers"])
+            tab_ov, tab_fin, tab_tr, tab_peer = st.tabs(
+                ["Overview", "Financials", "Trends", "Peers"])
 
             # ===================================================== OVERVIEW
             with tab_ov:
@@ -2793,23 +2793,21 @@ if page == "Profile":
                     st.dataframe(foicu.T, use_container_width=True)
 
             # ===================================================== MERGERS
-            with tab_mrg:
-                mg = merger_table(sig)
-                mine = (mg[mg.continuing_charter == cu].sort_values("cycle", ascending=False)
-                        if not mg.empty else pd.DataFrame())
-                if not mine.empty:
-                    st.caption(f"This credit union has absorbed {len(mine)} other "
-                               f"{'institution' if len(mine) == 1 else 'institutions'} since "
-                               "2018, per the NCUA Insurance Report of Activity.")
-                    st.dataframe(pd.DataFrame({
-                        "Quarter": mine.cycle.values,
-                        "Absorbed": mine.merging_name.values,
-                        "Assets at merger": [money(x) for x in mine.merging_assets.values],
-                        "Reason": mine.reason.values}),
-                        use_container_width=True, hide_index=True)
-                else:
-                    st.info("No absorbed mergers recorded for this credit union in the "
-                            "NCUA Insurance Report of Activity.")
+            # Merger footnote — quiet inline note at the bottom of Profile
+            _mg = merger_table(sig)
+            if not _mg.empty:
+                _mine = _mg[_mg.continuing_charter == cu].sort_values("cycle", ascending=False)
+                if not _mine.empty:
+                    st.divider()
+                    _shown = _mine.head(3)
+                    _mlist = ", ".join(
+                        f"{r.merging_name} ({r.cycle[:4]}, {money(r.merging_assets)})"
+                        for _, r in _shown.iterrows())
+                    _extra = (f" and {len(_mine) - 3} more" if len(_mine) > 3 else "")
+                    st.caption(f"🔀 **Merger activity:** absorbed {len(_mine)} "
+                               f"institution{'s' if len(_mine) > 1 else ''} since 2018 — "
+                               f"{_mlist}{_extra}. "
+                               "Source: NCUA Insurance Report of Activity.")
 
 # ============================================================ FPR
 elif page == "FPR":
