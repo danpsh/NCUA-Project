@@ -4174,18 +4174,20 @@ elif page == "Rankings":
                f"ranked by **{META[rank_key][0]}**. Change **Rank by** above to re-rank by any "
                "measure — the Rank column updates to match. (Clicking a grid header re-sorts the "
                "rows for a quick look, but won't renumber Rank.)")
-    _rank_sel = st.dataframe(disp, use_container_width=True, hide_index=True, height=600,
-                             column_config=colcfg, on_select="rerun",
-                             selection_mode="single-row", key="rank_tbl")
-    if _rank_sel.selection.rows:
-        _rcu = int(view.cu.values[_rank_sel.selection.rows[0]])
-        _rhit = mt[mt.cu == _rcu]
-        if not _rhit.empty and st.button(
-                f"Open {_rhit.iloc[0].cu_name.title()} in Profile →",
-                key="rank_goto"):
+    st.dataframe(disp, use_container_width=True, hide_index=True, height=600,
+                 column_config=colcfg)
+    _jump_rank = st.selectbox(
+        "Open in Profile", [None] + [int(c) for c in view.cu.values],
+        format_func=lambda c: "Open a credit union in Profile\u2026"
+            if c is None else ALL_LABELS.get(c, str(c)),
+        key="rank_jump", label_visibility="collapsed")
+    if _jump_rank is not None:
+        _jh = mt[mt.cu == _jump_rank]
+        if not _jh.empty:
             st.session_state["nav_page"] = "Profile"
-            st.session_state["profile_search"] = _rhit.iloc[0].cu_name
-            st.session_state["profile_pick"] = _rcu
+            st.session_state["profile_search"] = _jh.iloc[0].cu_name
+            st.session_state["profile_pick"] = _jump_rank
+            del st.session_state["rank_jump"]
             st.rerun()
 
 # ============================================================ MERGER HISTORY
@@ -4323,18 +4325,20 @@ elif page == "Yields":
                        "re-sorts rows only.) Yields on the NCUA FPR average-balance basis "
                        "((current + prior year-end) ÷ 2); cost of funds is total interest "
                        "expense over average shares + borrowings.")
-            _yld_sel = st.dataframe(disp, use_container_width=True, hide_index=True,
-                                    height=600, column_config=colcfg, on_select="rerun",
-                                    selection_mode="single-row", key="yld_tbl")
-            if _yld_sel.selection.rows:
-                _ycu = int(v.cu.values[_yld_sel.selection.rows[0]])
-                _yhit = mt[mt.cu == _ycu]
-                if not _yhit.empty and st.button(
-                        f"Open {_yhit.iloc[0].cu_name.title()} in Profile →",
-                        key="yld_goto"):
+            st.dataframe(disp, use_container_width=True, hide_index=True,
+                         height=600, column_config=colcfg)
+            _jump_yld = st.selectbox(
+                "Open in Profile", [None] + [int(c) for c in v.cu.values],
+                format_func=lambda c: "Open a credit union in Profile\u2026"
+                    if c is None else ALL_LABELS.get(c, str(c)),
+                key="yld_jump", label_visibility="collapsed")
+            if _jump_yld is not None:
+                _jh = mt[mt.cu == _jump_yld]
+                if not _jh.empty:
                     st.session_state["nav_page"] = "Profile"
-                    st.session_state["profile_search"] = _yhit.iloc[0].cu_name
-                    st.session_state["profile_pick"] = _ycu
+                    st.session_state["profile_search"] = _jh.iloc[0].cu_name
+                    st.session_state["profile_pick"] = _jump_yld
+                    del st.session_state["yld_jump"]
                     st.rerun()
 
 # ============================================================ TARGETS (M&A)
@@ -4384,18 +4388,20 @@ elif page == "M&A Targets":
                    "(smaller), growth (shrinking), capital (thinner net worth), and earnings "
                    "(low ROA / high efficiency) — each scored as a percentile within this "
                    "universe. A screen, not a recommendation.")
-        _ma_sel = st.dataframe(disp, use_container_width=True, hide_index=True,
-                               height=600, column_config=colcfg, on_select="rerun",
-                               selection_mode="single-row", key="ma_tbl")
-        if _ma_sel.selection.rows:
-            _mcu = int(v.cu.values[_ma_sel.selection.rows[0]])
-            _mhit = mt[mt.cu == _mcu]
-            if not _mhit.empty and st.button(
-                    f"Open {_mhit.iloc[0].cu_name.title()} in Profile →",
-                    key="ma_goto"):
+        st.dataframe(disp, use_container_width=True, hide_index=True,
+                     height=600, column_config=colcfg)
+        _jump_ma = st.selectbox(
+            "Open in Profile", [None] + [int(c) for c in v.cu.values],
+            format_func=lambda c: "Open a credit union in Profile\u2026"
+                if c is None else ALL_LABELS.get(c, str(c)),
+            key="ma_jump", label_visibility="collapsed")
+        if _jump_ma is not None:
+            _jh = mt[mt.cu == _jump_ma]
+            if not _jh.empty:
                 st.session_state["nav_page"] = "Profile"
-                st.session_state["profile_search"] = _mhit.iloc[0].cu_name
-                st.session_state["profile_pick"] = _mcu
+                st.session_state["profile_search"] = _jh.iloc[0].cu_name
+                st.session_state["profile_pick"] = _jump_ma
+                del st.session_state["ma_jump"]
                 st.rerun()
 
 # ============================================================ DATA QUALITY
