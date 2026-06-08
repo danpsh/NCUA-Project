@@ -2457,16 +2457,30 @@ if ("view" in _qp) or ("cu" in _qp):
     st.query_params.clear()
 
 st.sidebar.markdown("""<style>
-section[data-testid="stSidebar"] div[role="radiogroup"]{gap:2px}
-section[data-testid="stSidebar"] div[role="radiogroup"] > label{
-  padding:6px 12px;border-radius:9px;margin:1px 0;transition:background .12s}
-section[data-testid="stSidebar"] div[role="radiogroup"] > label:hover{background:#eceff4}
-section[data-testid="stSidebar"] div[role="radiogroup"] > label:has(input:checked){
-  background:#e6ebf5;font-weight:600}
+section[data-testid="stSidebar"] div[data-testid="stButton"]{margin:1px 0}
+section[data-testid="stSidebar"] div[data-testid="stButton"] > button{
+  border:none !important;box-shadow:none !important;width:100% !important;
+  background:transparent !important;color:rgb(49,51,63) !important;
+  text-align:left !important;justify-content:flex-start !important;
+  padding:7px 12px !important;border-radius:9px !important;
+  font-size:.9rem !important;font-weight:normal !important;
+  transition:background .12s !important}
+section[data-testid="stSidebar"] div[data-testid="stButton"] > button:hover{
+  background:#eceff4 !important;color:rgb(49,51,63) !important}
+section[data-testid="stSidebar"] div[data-testid="stButton"] > button[data-testid="baseButton-primary"]{
+  background:#e6ebf5 !important;font-weight:600 !important;color:#1a2a4a !important}
+section[data-testid="stSidebar"] div[data-testid="stButton"] > button[data-testid="baseButton-primary"]:hover{
+  background:#dce4f0 !important}
 </style>""", unsafe_allow_html=True)
 
-page = st.sidebar.radio("View", NAV, format_func=lambda p: f"{NAV_ICON[p]}  {p}",
-                        label_visibility="collapsed", key="nav_page")
+st.session_state.setdefault("nav_page", NAV[0])
+for _p in NAV:
+    if st.sidebar.button(f"{NAV_ICON[_p]}  {_p}", key=f"nav_{_p}",
+                         use_container_width=True,
+                         type="primary" if st.session_state.get("nav_page") == _p else "secondary"):
+        st.session_state["nav_page"] = _p
+        st.rerun()
+page = st.session_state.get("nav_page", NAV[0])
 
 
 def pick(label, options, key, help=None):
