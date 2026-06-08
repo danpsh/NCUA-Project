@@ -2459,16 +2459,17 @@ if ("view" in _qp) or ("cu" in _qp):
 st.sidebar.markdown("""<style>
 section[data-testid="stSidebar"] div[data-testid="stButton"]{margin:1px 0}
 section[data-testid="stSidebar"] div[data-testid="stButton"] > button{
-  border:none !important;box-shadow:none !important;width:100% !important;
+  border:1px solid #e2e5ea !important;box-shadow:none !important;width:100% !important;
   background:transparent !important;color:rgb(49,51,63) !important;
   text-align:left !important;justify-content:flex-start !important;
   padding:7px 12px !important;border-radius:9px !important;
   font-size:.9rem !important;font-weight:normal !important;
   transition:background .12s !important}
 section[data-testid="stSidebar"] div[data-testid="stButton"] > button:hover{
-  background:#eceff4 !important;color:rgb(49,51,63) !important}
+  background:#eceff4 !important;border-color:#c8cdd6 !important;color:rgb(49,51,63) !important}
 section[data-testid="stSidebar"] div[data-testid="stButton"] > button[data-testid="baseButton-primary"]{
-  background:#e6ebf5 !important;font-weight:600 !important;color:#1a2a4a !important}
+  background:#e6ebf5 !important;font-weight:600 !important;color:#1a2a4a !important;
+  border-color:#b8c4da !important}
 section[data-testid="stSidebar"] div[data-testid="stButton"] > button[data-testid="baseButton-primary"]:hover{
   background:#dce4f0 !important}
 </style>""", unsafe_allow_html=True)
@@ -2542,8 +2543,10 @@ if _worst != "ok":
                 st.caption("• " + msg)
 
 mt = enriched_table(cycle, basis, lens, sig)
-if "city" not in mt.columns:          # defensive: never break the City column downstream
-    mt["city"] = ""
+# Always pull city directly from metrics_table (the rate_table path that works correctly)
+# rather than relying on it surviving the enriched_table merge chain.
+_city_direct = metrics_table(cycle).set_index("cu")["city"]
+mt["city"] = mt.cu.map(_city_direct).fillna("")
 
 # label helper shared across pages
 ALL_LABELS = {r.cu: f"{r.cu_name} (#{r.cu}, {r.state})" for r in mt.itertuples()}
