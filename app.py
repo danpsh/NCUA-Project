@@ -3030,18 +3030,42 @@ elif page == "Chart":
     if st.session_state.get("chart_mode") not in _valid_modes:
         st.session_state.chart_mode = CHART_TYPES[0][0]
 
-    def _pick_mode(m):
-        st.session_state.chart_mode = m
+    # Handle tile click via query param (?ct=index)
+    _ct_idx = st.query_params.get("ct")
+    if _ct_idx is not None:
+        try:
+            _ct_i = int(_ct_idx)
+            if 0 <= _ct_i < len(CHART_TYPES):
+                st.session_state.chart_mode = CHART_TYPES[_ct_i][0]
+        except (ValueError, TypeError):
+            pass
+        st.query_params.clear()
 
-    rail, main = st.columns([1, 4.2], gap="medium")
-    with rail:
-        st.markdown("**Chart Type**")
-        for _val, _icon, _lbl in CHART_TYPES:
-            st.button(f"{_icon}  {_lbl}", key=f"ctbtn_{_val}", use_container_width=True,
-                      type="primary" if st.session_state.chart_mode == _val else "secondary",
-                      on_click=_pick_mode, args=(_val,))
     mode = st.session_state.chart_mode
 
+    # Chart type tile grid
+    _tiles = [
+        '<div style="display:grid;grid-template-columns:repeat(auto-fill,'
+        'minmax(130px,1fr));gap:10px;margin:0 0 20px">']
+    for _i, (_val, _icon, _lbl) in enumerate(CHART_TYPES):
+        _a   = (mode == _val)
+        _bg  = "#e6ebf5" if _a else "#ffffff"
+        _bdr = "1.5px solid #b8c4da" if _a else "1px solid #e2e5ea"
+        _fw  = "600" if _a else "400"
+        _tiles.append(
+            f'<a href="?ct={_i}" style="text-decoration:none">'
+            f'<div style="background:{_bg};border:{_bdr};border-radius:10px;'
+            f'padding:16px 8px 12px;text-align:center;cursor:pointer;'
+            f'display:flex;flex-direction:column;align-items:center;'
+            f'justify-content:center;min-height:86px">'
+            f'<div style="font-size:1.9rem;line-height:1;margin-bottom:9px">{_icon}</div>'
+            f'<div style="font-size:0.79rem;font-weight:{_fw};color:#1a2a4a;'
+            f'line-height:1.35">{_lbl}</div>'
+            f'</div></a>')
+    _tiles.append('</div>')
+    st.markdown(''.join(_tiles), unsafe_allow_html=True)
+
+    main = st.container()   # full-width (was a narrow rail column)
     with main:
         chart_slot = st.container()                   # live preview on top
         tab_data, tab_refine, tab_annot, tab_layout = st.tabs(
