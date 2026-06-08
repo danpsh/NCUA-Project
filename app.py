@@ -4064,10 +4064,10 @@ elif page == "Rankings":
     disp.insert(0, "Rank", range(1, len(disp) + 1))
     colcfg["Rank"] = st.column_config.NumberColumn("Rank", format="%d", width="small")
     floor_note = "" if include_small else f" ≥ ${RANK_MIN_ASSETS / 1e6:.0f}M assets"
-    st.caption(f"{len(view):,} credit unions shown{floor_note} (of {len(mt):,} total), {cycle} — "
-               f"initially ranked by **{META[rank_key][0]}**. Click any column header to "
-               "re-rank the whole table by that measure (the Rank column reflects the "
-               "“Rank by” choice).")
+    st.caption(f"{len(view):,} credit unions shown{floor_note} (of {len(mt):,} total), {cycle}, "
+               f"ranked by **{META[rank_key][0]}**. Change **Rank by** above to re-rank by any "
+               "measure — the Rank column updates to match. (Clicking a grid header re-sorts the "
+               "rows for a quick look, but won't renumber Rank.)")
     st.dataframe(disp, use_container_width=True, hide_index=True, height=600,
                  column_config=colcfg)
 
@@ -4199,12 +4199,12 @@ elif page == "Yields":
                 colcfg[lbl] = st.column_config.NumberColumn(lbl, format="%.2f%%")
             disp.insert(0, "Rank", range(1, len(disp) + 1))
             colcfg["Rank"] = st.column_config.NumberColumn("Rank", format="%d", width="small")
-            st.caption(f"All {len(v):,} credit unions ({label}), {cycle} — initially ranked by "
-                       f"**{labels[rank_key]}**. Click any column header to re-rank the entire "
-                       "table by that measure (the Rank column reflects the “Rank by” choice). "
-                       "Yields on the NCUA FPR average-balance basis ((current + prior "
-                       "year-end) ÷ 2); cost of funds is total interest expense over average "
-                       "shares + borrowings.")
+            st.caption(f"All {len(v):,} credit unions ({label}), {cycle}, ranked by "
+                       f"**{labels[rank_key]}**. Change **Rank by** above to re-rank by any "
+                       "measure — the Rank column updates to match. (Clicking a grid header "
+                       "re-sorts rows only.) Yields on the NCUA FPR average-balance basis "
+                       "((current + prior year-end) ÷ 2); cost of funds is total interest "
+                       "expense over average shares + borrowings.")
             st.dataframe(disp, use_container_width=True, hide_index=True, height=600,
                          column_config=colcfg)
 
@@ -4248,12 +4248,12 @@ elif page == "M&A Targets":
             colcfg[c2] = st.column_config.NumberColumn(c2, format="%.2f%%")
         disp.insert(0, "Rank", range(1, len(disp) + 1))
         colcfg["Rank"] = st.column_config.NumberColumn("Rank", format="%d", width="small")
-        st.caption(f"All {len(v):,} candidates in {label}, {cycle} — sorted by target score "
-                   "(click any column header to re-rank by that measure). Higher score = "
-                   "more target-like. Equal-weighted (25% each): size (smaller), growth "
-                   "(shrinking), capital (thinner net worth), and earnings (low ROA / high "
-                   "efficiency) — each scored as a percentile within this universe. A screen, "
-                   "not a recommendation.")
+        st.caption(f"All {len(v):,} candidates in {label}, {cycle}, sorted by target score "
+                   "(highest = most target-like). (Clicking a grid header re-sorts rows for a "
+                   "quick look but won't renumber Rank.) Equal-weighted (25% each): size "
+                   "(smaller), growth (shrinking), capital (thinner net worth), and earnings "
+                   "(low ROA / high efficiency) — each scored as a percentile within this "
+                   "universe. A screen, not a recommendation.")
         st.dataframe(disp, use_container_width=True, hide_index=True, height=600,
                      column_config=colcfg)
 
