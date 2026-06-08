@@ -1681,7 +1681,7 @@ def score_breakdown(row, weights):
         else:
             rows.append((META[key][0], fmt(key, row[key]),
                          f"{pr * 100:.0f}th pct" if pd.notna(pr) else "—", f"{w * 100:.0f}%"))
-    return pd.DataFrame(rows, columns=["Metric", "Value", "Peer percentile", "Weight"])
+    return pd.DataFrame(rows, columns=["Metric", "Value", "Peer Percentile", "Weight"])
 
 
 def multi_cu_series(cus, metric, labels, cycle_sig):
@@ -2406,7 +2406,7 @@ cycle = st.sidebar.selectbox("Quarter", all_cycles)
 
 SCORING_PAGES = {"Profile", "Compare", "Rankings"}        # show the score-lens picker
 GROWTH_PAGES = {"Profile", "Compare", "Rankings", "M&A Targets"}  # show growth basis
-GROWTH_OPTS = ["Year-over-year", "Quarter-over-quarter (annualized)"]
+GROWTH_OPTS = ["Year-Over-Year", "Quarter-Over-Quarter (Annualized)"]
 LENS_OPTS = list(SCORE_LENSES)
 st.session_state.setdefault("growth_label", GROWTH_OPTS[0])
 st.session_state.setdefault("score_lens", LENS_OPTS[0])
@@ -2461,12 +2461,12 @@ ALL_LABELS = {r.cu: f"{r.cu_name} (#{r.cu}, {r.state})" for r in mt.itertuples()
 def universe_picker(df, key):
     """Industry / band / state filter shared by the Rates and Targets pages.
     Returns (filtered_df, human_label)."""
-    mode = st.radio("Universe", ["Whole industry", "By asset band", "By state"],
+    mode = st.radio("Universe", ["Whole Industry", "By Asset Band", "By State"],
                     horizontal=True, key=f"{key}_mode")
-    if mode == "By asset band":
+    if mode == "By Asset Band":
         b = st.selectbox("Asset band", [x[2] for x in BANDS], index=4, key=f"{key}_band")
         return df[df.band == b], f"the {b} band"
-    if mode == "By state":
+    if mode == "By State":
         states = sorted(s for s in df.state.dropna().unique() if s)
         if not states:
             return df, "all credit unions"
@@ -2559,7 +2559,7 @@ if page == "Profile":
             if prev_row is not None:
                 cap += f"  ·  ▲▼ deltas vs prior quarter ({prev_cy})."
             st.caption(cap)
-            with st.expander("How this score is built"):
+            with st.expander("How This Score Is Built"):
                 st.dataframe(score_breakdown(row, weights), use_container_width=True,
                              hide_index=True)
 
@@ -2569,11 +2569,11 @@ if page == "Profile":
             # ===================================================== OVERVIEW
             with tab_ov:
                 scorecard_groups = [
-                    ("Size & balance sheet",
+                    ("Size & Balance Sheet",
                      ["assets", "loans", "shares", "net_worth", "net_income", "members"]),
-                    (f"Growth ({growth_label.lower()})", GROWTH_KEYS),
+                    (f"Growth ({growth_label})", GROWTH_KEYS),
                     ("Profitability", ["roa", "roe", "nim", "efficiency"]),
-                    ("Capital, asset quality & liquidity",
+                    ("Capital, Asset Quality & Liquidity",
                      ["nw_ratio", "delinquency", "nco", "lts"]),
                 ]
                 for i, (title, keys) in enumerate(scorecard_groups):
@@ -2585,7 +2585,7 @@ if page == "Profile":
                         metric_card(col, key, row, prev_row)
 
                 st.divider()
-                st.markdown("**Composite score history**")
+                st.markdown("**Composite Score History**")
                 hist = score_history(cu, basis, lens, cycle, sig)
                 if len(hist) > 1:
                     labels = [c[:4] if c.endswith("-12") else c for c in hist.index]
@@ -2612,7 +2612,7 @@ if page == "Profile":
                     file_name=f"{row.cu_name}_{cycle}_scorecard.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
-                with st.expander("Efficiency Ratio breakdown"):
+                with st.expander("Efficiency Ratio Breakdown"):
                     nii = row.int_income - row.int_expense
                     rev = nii + row.non_int_income
                     bd = pd.DataFrame([
@@ -2629,11 +2629,11 @@ if page == "Profile":
             # ===================================================== FINANCIALS
             with tab_fin:
                 sc1, sc2 = st.columns(2)
-                stmt = sc1.radio("Statement", ["Balance sheet", "Income statement"],
+                stmt = sc1.radio("Statement", ["Balance Sheet", "Income Statement"],
                                  horizontal=True)
                 pmode = sc2.radio("Periods", ["Quarters", "Years"], horizontal=True)
-                schema = BALANCE_SHEET if stmt == "Balance sheet" else INCOME_STATEMENT
-                sdf = build_statement(cu, schema, stmt == "Income statement", pmode, cycle, sig)
+                schema = BALANCE_SHEET if stmt == "Balance Sheet" else INCOME_STATEMENT
+                sdf = build_statement(cu, schema, stmt == "Income Statement", pmode, cycle, sig)
                 if sdf.empty:
                     st.info("No statement data available for this credit union and period.")
                 else:
@@ -2642,7 +2642,7 @@ if page == "Profile":
                     note = ("Built from NCUA call report accounts and tied to the reported "
                             "totals. Lines marked “implied” (investments, provision for credit "
                             "losses, other) are derived so the statement foots exactly.")
-                    if stmt == "Income statement":
+                    if stmt == "Income Statement":
                         note += (" Income figures are year-to-date in the call report; the "
                                  "Quarters view de-cumulates them into standalone quarters.")
                     st.caption(note)
@@ -2654,7 +2654,7 @@ if page == "Profile":
                 vals = acct_values(cu, cycle, sig)
                 mc1, mc2 = st.columns(2)
                 with mc1:
-                    st.markdown("**Loan mix**")
+                    st.markdown("**Loan Mix**")
                     lm = mix_frame(vals, LOAN_MIX, "ACCT_025B", "Other")
                     if lm.empty:
                         st.caption("No loan data for this credit union.")
@@ -2664,7 +2664,7 @@ if page == "Profile":
                                    "(first mortgage, other RE, vehicle, commercial, and "
                                    "consumer categories); foots to total loans & leases.")
                 with mc2:
-                    st.markdown("**Deposit mix**")
+                    st.markdown("**Deposit Mix**")
                     dm = mix_frame(vals, DEPOSIT_MIX, "ACCT_018",
                                    "Other (incl. IRA / Keogh)")
                     if dm.empty:
@@ -2674,7 +2674,7 @@ if page == "Profile":
                         st.caption("Share composition from the NCUA call report; the residual "
                                    "captures IRA/Keogh and any other shares.")
 
-                with st.expander("Raw call report tables (advanced)"):
+                with st.expander("Raw Call Report Tables (Advanced)"):
                     table = st.selectbox("Table", [t for t in tables if t not in BROWSE_SKIP])
                     try:
                         raw = con.execute(
@@ -2785,7 +2785,7 @@ if page == "Profile":
                                "delinquency, and charge-offs).")
                 else:
                     st.info("Pick at least one peer to benchmark against.")
-                with st.expander("Identity / FOICU fields"):
+                with st.expander("Identity / FOICU Fields"):
                     foicu = con.execute(
                         f"SELECT * FROM read_parquet('{glob_for('FOICU')}', "
                         "hive_partitioning=true, union_by_name=true) "
@@ -2903,7 +2903,7 @@ elif page == "FPR":
 
 # ============================================================ ROA BRIDGE
 elif page == "ROA Bridge":
-    st.subheader("ROA bridge — what drives the gap to peers")
+    st.subheader("ROA Bridge — What Drives the Gap to Peers")
     cu_keys = list(ALL_LABELS)
     if not cu_keys:
         st.info("No credit unions available for this cycle.")
@@ -2960,7 +2960,7 @@ elif page == "ROA Bridge":
 
 # ============================================================ COMPARE
 elif page == "Compare":
-    st.subheader("Compare credit unions side by side")
+    st.subheader("Compare Credit Unions Side by Side")
     picks = st.multiselect("Pick 2–5 credit unions", list(ALL_LABELS),
                            format_func=lambda n: ALL_LABELS[n], max_selections=5)
     if len(picks) < 2:
@@ -2974,7 +2974,7 @@ elif page == "Compare":
             file_name=f"cu_comparison_{cycle}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         if len(all_cycles) > 1:
-            st.subheader("Trend overlays")
+            st.subheader("Trend Overlays")
             oc1, oc2 = st.columns([1, 3])
             ov_span = oc1.radio("Period", ["Quarters", "Years"], horizontal=True,
                                 key="cmp_span")
@@ -3009,7 +3009,7 @@ elif page == "Compare":
 # ============================================================ CHART
 elif page == "Chart":
     import plotly.graph_objects as go
-    st.subheader("Chart builder")
+    st.subheader("Chart Builder")
     PALETTES = {
         "Datawrapper default": ["#2563eb", "#dc2626", "#059669", "#d97706", "#7c3aed", "#0891b2"],
         "Colorblind-safe":     ["#0072b2", "#e69f00", "#009e73", "#d55e00", "#cc79a7", "#56b4e9"],
@@ -3021,9 +3021,9 @@ elif page == "Chart":
     MUTED_COLOR = "#c9ced6"          # greyed-out lines when emphasizing a subset
 
     CHART_TYPES = [
-        ("Compare credit unions on one measure", "📈", "Lines · compare"),
-        ("One credit union across measures", "📉", "Lines · one CU"),
-        ("Bars & columns", "📊", "Bars & columns"),
+        ("Compare credit unions on one measure", "📈", "Lines · Compare"),
+        ("One credit union across measures", "📉", "Lines · One CU"),
+        ("Bars & Columns", "📊", "Bars & Columns"),
         ("Composition (mix)", "🍩", "Composition"),
     ]
     _valid_modes = [v for v, _, _ in CHART_TYPES]
@@ -3035,7 +3035,7 @@ elif page == "Chart":
 
     rail, main = st.columns([1, 4.2], gap="medium")
     with rail:
-        st.markdown("**Chart type**")
+        st.markdown("**Chart Type**")
         for _val, _icon, _lbl in CHART_TYPES:
             st.button(f"{_icon}  {_lbl}", key=f"ctbtn_{_val}", use_container_width=True,
                       type="primary" if st.session_state.chart_mode == _val else "secondary",
@@ -3279,7 +3279,7 @@ elif page == "Chart":
     if len(in_range) < 2:
         chart_slot.info("Pick a range spanning at least two periods to plot a trend.")
 
-    elif mode == "Bars & columns":
+    elif mode == "Bars & Columns":
         with tab_data:
             bo1, bo2, bo3 = st.columns(3)
             orient = bo1.radio("Orientation", ["Columns", "Bars"], horizontal=True,
@@ -3490,7 +3490,7 @@ elif page == "Chart":
             comp_cu = st.selectbox("Credit union", cu_keys,
                                    index=cu_keys.index(default_cu) if default_cu in cu_keys else 0,
                                    format_func=lambda c: ALL_LABELS[c], key="comp_cu")
-            disp = st.radio("Display", ["Snapshot (pie / donut)", "Over time (stacked)"],
+            disp = st.radio("Display", ["Snapshot (Pie / Donut)", "Over Time (Stacked)"],
                             horizontal=True)
         parts, total_code, resid = MIX_SOURCES[src]
         cu_name = ALL_LABELS[comp_cu].split(" (#")[0]
@@ -3502,7 +3502,7 @@ elif page == "Chart":
                                        format_func=lambda c: _period_label(c, span),
                                        key="comp_period")
                 shape = _cs.radio("Chart type",
-                                  ["Donut", "Pie", "Horizontal bar"],
+                                  ["Donut", "Pie", "Horizontal Bar"],
                                   horizontal=True, key="comp_shape")
                 _cl, _cpr, _clg = st.columns(3)
                 label_mode = _cl.radio("Labels",
@@ -3559,7 +3559,7 @@ elif page == "Chart":
                 else:
                     _leg_kw = dict(showlegend=False)
                 colors = [cat_pal[i % len(cat_pal)] for i in range(len(mf))]
-                if shape == "Horizontal bar":
+                if shape == "Horizontal Bar":
                     _mfs = mf.sort_values("Share", ascending=True).reset_index(drop=True)
                     _bar_clr = [cat_pal[i % len(cat_pal)] for i in range(len(_mfs))]
                     _bar_txt = ([f"{v:.{_dec_n}f}%" for v in _mfs["Share"]]
@@ -4019,7 +4019,7 @@ elif page == "Chart":
 
 # ============================================================ RANKINGS
 elif page == "Rankings":
-    st.subheader("Screen & rank all credit unions")
+    st.subheader("Screen & Rank All Credit Unions")
     f1, f2 = st.columns(2)
     all_states = sorted(s for s in mt.state.unique() if s)
     sel_states = f1.multiselect("State(s)", all_states, default=[])
@@ -4107,7 +4107,7 @@ elif page == "Rankings":
 
 # ============================================================ MERGER HISTORY
 elif page == "Merger History":
-    st.subheader("Merger history")
+    st.subheader("Merger History")
     mg = merger_table(sig)
     if mg.empty:
         st.info("No merger data yet. Run the **Ingest mergers** workflow, then reboot the app "
@@ -4163,7 +4163,7 @@ elif page == "Merger History":
 
 # ============================================================ INDUSTRY
 elif page == "Industry":
-    st.subheader("Industry overview")
+    st.subheader("Industry Overview")
     if len(all_cycles) > 1:
         ind = industry_timeseries(sig)
         a, b = st.columns(2)
@@ -4180,7 +4180,7 @@ elif page == "Industry":
         with d:
             st.caption("Median Efficiency Ratio")
             st.line_chart(ind[["Median Efficiency"]])
-        with st.expander("Industry table (all quarters)"):
+        with st.expander("Industry Table (All Quarters)"):
             tbl = ind.copy()
             for c2 in ["Total Assets", "Total Net Worth"]:
                 tbl[c2] = tbl[c2].apply(money)
@@ -4192,7 +4192,7 @@ elif page == "Industry":
     else:
         st.info("Industry trends need more than one quarter of data.")
 
-    st.subheader(f"By state — {cycle}")
+    st.subheader(f"By State — {cycle}")
     g = mt.groupby("state").agg(
         CUs=("cu", "size"), total_assets=("assets", "sum"),
         median_roa=("roa", "median"), median_eff=("efficiency", "median")).reset_index()
@@ -4206,7 +4206,7 @@ elif page == "Industry":
 
 # ============================================================ RATES
 elif page == "Yields":
-    st.subheader("Rate & spread leaderboard")
+    st.subheader("Rate & Spread Leaderboard")
     rt = rate_table(cycle, sig)
     if rt.empty:
         st.info("No rate data available for this quarter.")
@@ -4247,7 +4247,7 @@ elif page == "Yields":
 
 # ============================================================ TARGETS (M&A)
 elif page == "M&A Targets":
-    st.subheader("M&A target screener")
+    st.subheader("M&A Target Screener")
     st.caption("Ranks credit unions by acquisition-target attractiveness from four distress "
                "signals — small size, shrinking, thin capital, and weak earnings. Confirmed "
                "and likely acquirers are excluded (they're consolidators, not targets).")
