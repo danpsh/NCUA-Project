@@ -502,9 +502,13 @@ def acct_names():
 def metrics_table(cycle):
     annualize = 12 / int(cycle[-2:])
     pye = f"{int(cycle[:4]) - 1}-12"          # prior year-end, for FPR average balances
+    _foicu_cols = {c.upper() for c in con.execute(
+        f"SELECT * FROM read_parquet('{glob_for('FOICU')}', hive_partitioning=true, "
+        "union_by_name=true) LIMIT 0").df().columns}
+    city_sel = "COALESCE(o.CITY, '')" if "CITY" in _foicu_cols else "''"
     d = con.execute(f"""
       SELECT o.CU_NUMBER AS cu, o.CU_NAME AS cu_name, COALESCE(o.STATE, '') AS state,
-        COALESCE(o.CITY, '') AS city,
+        {city_sel} AS city,
         TRY_CAST(f.ACCT_010  AS DOUBLE) AS assets,
         TRY_CAST(p.assets_pye AS DOUBLE) AS assets_pye,
         TRY_CAST(p.loans_pye  AS DOUBLE) AS loans_pye,
@@ -2524,6 +2528,8 @@ if _worst != "ok":
                 st.caption("• " + msg)
 
 mt = enriched_table(cycle, basis, lens, sig)
+if "city" not in mt.columns:          # defensive: never break the City column downstream
+    mt["city"] = ""
 
 # label helper shared across pages
 ALL_LABELS = {r.cu: f"{r.cu_name} (#{r.cu}, {r.state})" for r in mt.itertuples()}
