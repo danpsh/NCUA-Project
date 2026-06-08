@@ -2864,7 +2864,7 @@ elif page == "FPR":
     if not cu_keys:
         st.info("No credit unions available for this cycle.")
     else:
-        default_cu = next((c for c in cu_keys if str(c) == "61790"), cu_keys[0])
+        default_cu = cu_keys[0]
         h1, h2, h3 = st.columns([2, 2, 1])
         cu_pick = h1.selectbox("Credit union", cu_keys,
                                index=cu_keys.index(default_cu),
@@ -2955,7 +2955,7 @@ elif page == "ROA Bridge":
     if not cu_keys:
         st.info("No credit unions available for this cycle.")
     else:
-        default_cu = next((c for c in cu_keys if str(c) == "61790"), cu_keys[0])
+        default_cu = cu_keys[0]
         cu_pick = st.selectbox("Credit union", cu_keys,
                                index=cu_keys.index(default_cu),
                                format_func=lambda c: ALL_LABELS[c])
@@ -3200,7 +3200,7 @@ elif page == "Chart":
     TITLE_X = {"Left": (0.0, "left"), "Center": (0.5, "center"),
                "Right": (1.0, "right")}[title_align]
     metric_keys = [k for k, _, _ in CHART_METRICS]
-    default_cu = next((c for c in ALL_LABELS if str(c) == "61790"), next(iter(ALL_LABELS), None))
+    default_cu = next(iter(ALL_LABELS), None)
     x_is_category = True   # False for horizontal bars (value axis on x) -> skip period markers
 
     def axis_kw(kind):
@@ -3447,9 +3447,7 @@ elif page == "Chart":
             if d.empty:
                 chart_slot.info("No data for this measure at the selected quarter.")
             else:
-                has_blu = (d.cu.astype(str) == "61790").any()
-                hi_col, base_col = PALETTE[0], ("#aab2bd" if has_blu else PALETTE[0])
-                cols = [hi_col if str(c) == "61790" else base_col for c in d.cu]
+                cols = [PALETTE[0]] * len(d)
                 cats, vals = d.cu_name.tolist(), d[metric].tolist()
                 with tab_data:
                     title = st.text_input(
@@ -3474,8 +3472,7 @@ elif page == "Chart":
                 chart_slot.plotly_chart(fig, use_container_width=True,
                                         config=export_config(title))
                 chart_slot.caption(f"{CHART_LABEL[metric]} across the peer universe at "
-                                   f"{_period_label(cycle, 'Quarters')}; BluCurrent highlighted "
-                                   "in the accent colour.")
+                                   f"{_period_label(cycle, 'Quarters')}.")
 
     elif mode.startswith("Compare"):
         with tab_data:
@@ -3804,9 +3801,7 @@ elif page == "Chart":
                               "Range (two periods)", "Arrow (change)"], horizontal=True)
 
         def hl_colors(cu_series):
-            has = (cu_series.astype(str) == "61790").any()
-            base = "#aab2bd" if has else PALETTE[0]
-            return [PALETTE[0] if str(c) == "61790" else base for c in cu_series]
+            return [PALETTE[0]] * len(cu_series)
 
         if ptype.startswith("Scatter"):
             with tab_data:
@@ -3837,7 +3832,7 @@ elif page == "Chart":
                     sizes = 8 + 34 * (sv / (sv.max() or 1)) ** 0.5
                 else:
                     sizes = 9
-                txt_ = [nm if str(c) == "61790" else "" for c, nm in zip(d.cu, d.cu_name)]
+                txt_ = [""] * len(d)
                 fig = go.Figure(go.Scatter(
                     x=d[xk], y=d[yk], mode="markers+text", text=txt_, textposition="top center",
                     textfont=dict(size=10), customdata=d.cu_name,
@@ -3850,7 +3845,7 @@ elif page == "Chart":
                 styled(fig, title)
                 fig.update_layout(showlegend=False, hovermode="closest")
                 fig.update_xaxes(showgrid=gridlines)
-                cap = f"Each dot is a credit union at {qlabel}; BluCurrent highlighted."
+                cap = f"Each dot is a credit union at {qlabel}."
                 if sizek != "(none)":
                     cap += f" Dot size ∝ {CHART_LABEL[sizek]}."
                 chart_slot.plotly_chart(fig, use_container_width=True, config=export_config(title))
@@ -3888,7 +3883,7 @@ elif page == "Chart":
                 fig.update_yaxes(showgrid=False, autorange="reversed")
                 chart_slot.plotly_chart(fig, use_container_width=True, config=export_config(title))
                 chart_slot.caption(f"{CHART_LABEL[metric]} across peers at {qlabel}; "
-                                   "BluCurrent highlighted.")
+                                   "")
 
         else:                                  # Range or Arrow — two periods, one measure
             is_arrow = ptype.startswith("Arrow")
