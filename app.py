@@ -2508,10 +2508,11 @@ if page == "Profile":
             _pend = int(_pend)
         except (TypeError, ValueError):
             pass
-        _nm = ALL_LABELS.get(_pend, "").split(" (#")[0]
-        if _nm:
-            st.session_state["profile_search"] = _nm
-            st.session_state["profile_pick"] = _pend
+        if isinstance(_pend, int):
+            _phit = mt[mt.cu == _pend]
+            if not _phit.empty:
+                st.session_state["profile_search"] = _phit.iloc[0].cu_name
+                st.session_state["profile_pick"] = _pend
     st.session_state.setdefault("profile_search", "BluCurrent")
     _sq, _ = st.columns([1, 2])
     query = _sq.text_input("Search a credit union by name", key="profile_search",
