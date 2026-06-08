@@ -2577,8 +2577,7 @@ if page == "Profile":
                 st.markdown(
                     f"<div style='font-size:1.25rem;line-height:1;margin-top:-10px'>"
                     f"{stars_str(row.stars)}</div>", unsafe_allow_html=True)
-            if prev_row is not None:
-                st.caption(f"▲▼ deltas vs prior quarter ({prev_cy}).")
+
             st.markdown("""<style>
             button[data-testid="stTab"]{font-size:.95rem !important;padding:10px 22px !important;font-weight:500 !important}
             </style>""", unsafe_allow_html=True)
