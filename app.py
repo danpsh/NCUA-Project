@@ -252,12 +252,9 @@ def _delta(key, cur, prev):
 
 
 def metric_card(col, key, row, prev_row):
-    """Render an st.metric with a prior-quarter delta (direction-aware coloring).
-    Money values use compact notation so large figures fit narrow/mobile cards."""
-    prev = prev_row[key] if (prev_row is not None and key in prev_row) else None
-    text, color = _delta(key, row[key], prev)
+    """Render an st.metric (value only, no delta)."""
     val = money_compact(row[key]) if META[key][1] == "money" else fmt(key, row[key])
-    col.metric(META[key][0], val, delta=text, delta_color=color)
+    col.metric(META[key][0], val)
 
 
 def color_scale(series, direction):
