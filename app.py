@@ -2513,8 +2513,10 @@ if page == "Profile":
             st.session_state["profile_search"] = _nm
             st.session_state["profile_pick"] = _pend
     st.session_state.setdefault("profile_search", "BluCurrent")
-    query = st.text_input("Search a credit union by name", key="profile_search",
-                          placeholder="e.g. BluCurrent")
+    _sq, _ = st.columns([1, 2])
+    query = _sq.text_input("Search a credit union by name", key="profile_search",
+                           placeholder="Search by name…",
+                           label_visibility="collapsed")
     if not query:
         st.info("Type part of a credit union name to begin.")
     else:
@@ -2535,6 +2537,24 @@ if page == "Profile":
 
             st.subheader(labels[cu])
             st.caption(f"Asset peer group: {row.band}")
+            _fr   = foicu_row(cu, cycle, sig)
+            _city = row.city.title() if row.city else ""
+            _st   = row.state or ""
+            _loc  = ", ".join(filter(None, [_city, _st]))
+            _web_raw = next((_fr.get(k, "") for k in
+                             ["WEB_ADDR", "WEB_SITE", "WEBSITE", "URL", "SITE_URL"]
+                             if _fr.get(k, "")), "")
+            _web = _web_raw.strip() if _web_raw else ""
+            if _web and not _web.lower().startswith("http"):
+                _web = "https://" + _web
+            _web_disp = _web.lower().replace("https://","").replace("http://","").rstrip("/")
+            _loc_parts = [p for p in [_loc,
+                (f'<a href="{_web}" target="_blank">{_web_disp}</a>' if _web else "")] if p]
+            if _loc_parts:
+                st.markdown(
+                    f'<p style="color:#64748b;font-size:0.85rem;margin-top:-8px">'
+                    + " · ".join(_loc_parts) + "</p>",
+                    unsafe_allow_html=True)
             _cv = conversions_table(sig)
             if not _cv.empty and "new_charter" in _cv.columns:
                 _pred = _cv[_cv.new_charter == cu]
@@ -2559,10 +2579,9 @@ if page == "Profile":
             if prev_row is not None:
                 cap += f"  ·  ▲▼ deltas vs prior quarter ({prev_cy})."
             st.caption(cap)
-            with st.expander("How This Score Is Built"):
-                st.dataframe(score_breakdown(row, weights), use_container_width=True,
-                             hide_index=True)
-
+            st.markdown("""<style>
+            button[data-testid="stTab"]{font-size:.95rem !important;padding:10px 22px !important;font-weight:500 !important}
+            </style>""", unsafe_allow_html=True)
             tab_ov, tab_fin, tab_tr, tab_peer = st.tabs(
                 ["Overview", "Financials", "Trends", "Peers"])
 
@@ -2808,6 +2827,10 @@ if page == "Profile":
                                f"institution{'s' if len(_mine) > 1 else ''} since 2018 — "
                                f"{_mlist}{_extra}. "
                                "Source: NCUA Insurance Report of Activity.")
+
+            with st.expander("How This Score Is Built"):
+                st.dataframe(score_breakdown(row, weights), use_container_width=True,
+                             hide_index=True)
 
 # ============================================================ FPR
 elif page == "FPR":
