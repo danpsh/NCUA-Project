@@ -2443,8 +2443,26 @@ NAV = ["Profile", "FPR", "ROA Bridge", "Compare", "Chart", "Rankings", "Yields",
 NAV_ICON = {"Profile": "👤", "FPR": "📄", "ROA Bridge": "🌉", "Compare": "⚖️", "Chart": "📊", "Rankings": "🏆",
             "Yields": "📈", "M&A Targets": "🎯",
             "Merger History": "🔀", "Industry": "🏛️", "Data Health": "🩺"}
+# Deep-link routing: ranked tables link to ?view=<page>&cu=<id> to jump straight there.
+_qp = st.query_params
+if _qp.get("view") in NAV:
+    st.session_state["nav_page"] = _qp.get("view")
+if _qp.get("cu"):
+    st.session_state["profile_pending_cu"] = _qp.get("cu")
+if ("view" in _qp) or ("cu" in _qp):
+    st.query_params.clear()
+
+st.sidebar.markdown("""<style>
+section[data-testid="stSidebar"] div[role="radiogroup"]{gap:2px}
+section[data-testid="stSidebar"] div[role="radiogroup"] > label{
+  padding:6px 12px;border-radius:9px;margin:1px 0;transition:background .12s}
+section[data-testid="stSidebar"] div[role="radiogroup"] > label:hover{background:#eceff4}
+section[data-testid="stSidebar"] div[role="radiogroup"] > label:has(input:checked){
+  background:#e6ebf5;font-weight:600}
+</style>""", unsafe_allow_html=True)
+
 page = st.sidebar.radio("View", NAV, format_func=lambda p: f"{NAV_ICON[p]}  {p}",
-                        label_visibility="collapsed")
+                        label_visibility="collapsed", key="nav_page")
 
 
 def pick(label, options, key, help=None):
@@ -2555,7 +2573,18 @@ def screen_filters(df, key, default_top=100, show_top=True):
 
 # ============================================================ PROFILE
 if page == "Profile":
-    query = st.text_input("Search a credit union by name", value="BluCurrent",
+    _pend = st.session_state.pop("profile_pending_cu", None)
+    if _pend is not None:
+        try:
+            _pend = int(_pend)
+        except (TypeError, ValueError):
+            pass
+        _nm = ALL_LABELS.get(_pend, "").split(" (#")[0]
+        if _nm:
+            st.session_state["profile_search"] = _nm
+            st.session_state["profile_pick"] = _pend
+    st.session_state.setdefault("profile_search", "BluCurrent")
+    query = st.text_input("Search a credit union by name", key="profile_search",
                           placeholder="e.g. BluCurrent")
     if not query:
         st.info("Type part of a credit union name to begin.")
@@ -2564,7 +2593,10 @@ if page == "Profile":
         st.caption(f"{len(hits)} match(es) in {cycle}")
         if not hits.empty:
             labels = {r.cu: ALL_LABELS[r.cu] for r in hits.itertuples()}
-            cu = st.selectbox("Select a credit union", list(labels),
+            _opts = list(labels)
+            _pp = st.session_state.get("profile_pick")
+            _idx = _opts.index(_pp) if _pp in labels else 0
+            cu = st.selectbox("Select a credit union", _opts, index=_idx,
                               format_func=lambda n: labels[n])
             row = mt[mt.cu == cu].iloc[0]
             ts = cu_timeseries(cu, sig)
@@ -4070,6 +4102,8 @@ elif page == "Rankings":
                f"ranked by **{META[rank_key][0]}**. Change **Rank by** above to re-rank by any "
                "measure — the Rank column updates to match. (Clicking a grid header re-sorts the "
                "rows for a quick look, but won't renumber Rank.)")
+    disp["Open"] = [f"?view=Profile&cu={c}" for c in view.cu.values]
+    colcfg["Open"] = st.column_config.LinkColumn("Open", display_text="Profile ↗", width="small")
     st.dataframe(disp, use_container_width=True, hide_index=True, height=600,
                  column_config=colcfg)
 
@@ -4208,6 +4242,8 @@ elif page == "Yields":
                        "re-sorts rows only.) Yields on the NCUA FPR average-balance basis "
                        "((current + prior year-end) ÷ 2); cost of funds is total interest "
                        "expense over average shares + borrowings.")
+            disp["Open"] = [f"?view=Profile&cu={c}" for c in v.cu.values]
+            colcfg["Open"] = st.column_config.LinkColumn("Open", display_text="Profile ↗", width="small")
             st.dataframe(disp, use_container_width=True, hide_index=True, height=600,
                          column_config=colcfg)
 
@@ -4258,6 +4294,8 @@ elif page == "M&A Targets":
                    "(smaller), growth (shrinking), capital (thinner net worth), and earnings "
                    "(low ROA / high efficiency) — each scored as a percentile within this "
                    "universe. A screen, not a recommendation.")
+        disp["Open"] = [f"?view=Profile&cu={c}" for c in v.cu.values]
+        colcfg["Open"] = st.column_config.LinkColumn("Open", display_text="Profile ↗", width="small")
         st.dataframe(disp, use_container_width=True, hide_index=True, height=600,
                      column_config=colcfg)
 
