@@ -2474,14 +2474,51 @@ section[data-testid="stSidebar"] div[data-testid="stButton"] > button[data-testi
   background:#dce4f0 !important}
 </style>""", unsafe_allow_html=True)
 
-st.session_state.setdefault("nav_page", NAV[0])
-for _p in NAV:
+# ---- Dev gate -------------------------------------------------------
+_PUBLIC_NAV = ["Profile", "FPR", "Industry"]
+try:
+    _dev_pw = st.secrets.get("DEV_PASSWORD", "")
+except Exception:
+    _dev_pw = ""
+
+if not _dev_pw:
+    # Secret not yet configured — show everything so you're not locked out
+    NAV_VISIBLE = NAV
+elif st.session_state.get("dev_mode"):
+    NAV_VISIBLE = NAV
+else:
+    NAV_VISIBLE = _PUBLIC_NAV
+    with st.sidebar.expander("🔐 Dev access"):
+        _pw_in = st.text_input("Password", type="password", key="dev_pw_input",
+                               label_visibility="collapsed", placeholder="Enter password")
+        if _pw_in and _pw_in == _dev_pw:
+            st.session_state["dev_mode"] = True
+            st.rerun()
+        elif _pw_in:
+            st.caption("Incorrect password")
+
+# Clamp to visible set (handles deep-links to gated pages in public mode)
+if st.session_state.get("nav_page") not in NAV_VISIBLE:
+    st.session_state["nav_page"] = NAV_VISIBLE[0]
+
+st.session_state.setdefault("nav_page", NAV_VISIBLE[0])
+for _p in NAV_VISIBLE:
     if st.sidebar.button(f"{NAV_ICON[_p]}  {_p}", key=f"nav_{_p}",
                          use_container_width=True,
                          type="primary" if st.session_state.get("nav_page") == _p else "secondary"):
         st.session_state["nav_page"] = _p
         st.rerun()
-page = st.session_state.get("nav_page", NAV[0])
+page = st.session_state.get("nav_page", NAV_VISIBLE[0])
+
+# Exit dev mode (bottom of sidebar)
+if _dev_pw and st.session_state.get("dev_mode"):
+    st.sidebar.divider()
+    if st.sidebar.button("🔓 Exit developer mode", key="dev_logout",
+                         use_container_width=True):
+        st.session_state["dev_mode"] = False
+        if st.session_state.get("nav_page") not in _PUBLIC_NAV:
+            st.session_state["nav_page"] = _PUBLIC_NAV[0]
+        st.rerun()
 
 
 def pick(label, options, key, help=None):
