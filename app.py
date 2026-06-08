@@ -2424,9 +2424,9 @@ st.sidebar.markdown("#### Call Report Explorer")
 
 # ---- Sidebar: navigation (grouped by workflow, icon-labeled) ----
 NAV = ["Profile", "FPR", "ROA Bridge", "Compare", "Chart", "Rankings", "Yields", "M&A Targets",
-       "Movers", "Merger History", "Industry", "Data Health"]
+       "Merger History", "Industry", "Data Health"]
 NAV_ICON = {"Profile": "👤", "FPR": "📄", "ROA Bridge": "🌉", "Compare": "⚖️", "Chart": "📊", "Rankings": "🏆",
-            "Yields": "📈", "M&A Targets": "🎯", "Movers": "🚀",
+            "Yields": "📈", "M&A Targets": "🎯",
             "Merger History": "🔀", "Industry": "🏛️", "Data Health": "🩺"}
 page = st.sidebar.radio("View", NAV, format_func=lambda p: f"{NAV_ICON[p]}  {p}",
                         label_visibility="collapsed")
@@ -2447,7 +2447,7 @@ st.sidebar.caption("Settings")
 cycle = st.sidebar.selectbox("Quarter", all_cycles)
 
 SCORING_PAGES = {"Profile", "Compare", "Rankings"}        # show the score-lens picker
-GROWTH_PAGES = {"Profile", "Compare", "Rankings", "M&A Targets", "Movers"}  # show growth basis
+GROWTH_PAGES = {"Profile", "Compare", "Rankings", "M&A Targets"}  # show growth basis
 GROWTH_OPTS = ["Year-over-year", "Quarter-over-quarter (annualized)"]
 LENS_OPTS = list(SCORE_LENSES)
 st.session_state.setdefault("growth_label", GROWTH_OPTS[0])
@@ -4050,81 +4050,7 @@ elif page == "Rankings":
     st.dataframe(disp, use_container_width=True, hide_index=True, height=600,
                  column_config=colcfg)
 
-# ============================================================ MOVERS
-elif page == "Movers":
-    st.subheader("Biggest movers")
-    st.caption(f"Growth basis: {growth_label.lower()}. In the Merger column, ✓ marks a confirmed "
-               "acquirer (last 4 quarters) and ≈ a likely one not yet in the NCUA report — "
-               "toggle the box to exclude them.")
-    m1, m2 = st.columns([2, 1])
-    gkey = m1.selectbox("Growth metric", GROWTH_KEYS, format_func=lambda k: META[k][0])
-    min_assets = m2.selectbox("Minimum asset size",
-                              ["$10M", "$50M", "$100M", "$500M", "$1B"], index=1)
-    floor = {"$10M": 10e6, "$50M": 50e6, "$100M": 100e6, "$500M": 500e6, "$1B": 1e9}[min_assets]
-    acq = merger_acquirers(cycle, sig)
-    inf = inferred_acquirers(cycle, sig)
-    tagged = set(acq) | set(inf)
-    hide = False
-    if tagged:
-        hide = st.checkbox("Exclude merger-driven growth (credit unions that absorbed "
-                           "another in the last 4 quarters)", value=False)
-    pool = mt[(mt.assets >= floor)].dropna(subset=[gkey]).copy()
-    pool["_tag"] = [merger_tag(c, acq, inf) for c in pool.cu.values]
-    if hide:
-        pool = pool[pool._tag == ""]
-    if pool.empty:
-        st.info("No credit unions with growth data for this basis yet "
-                "(needs a prior-period quarter ingested).")
-    else:
-        cols = ["cu_name", "state", "assets", gkey, "_tag"]
-        gain = pool.nlargest(15, gkey)[cols]
-        lose = pool.nsmallest(15, gkey)[cols]
-
-        def fmt_movers(df):
-            d = pd.DataFrame({
-                "Credit Union": df.cu_name.values, "State": df.state.values,
-                "Assets": [money(x) for x in df.assets.values],
-                META[gkey][0]: [pct(x) for x in df[gkey].values]})
-            if tagged and not hide:
-                d["Merger"] = df._tag.values
-            return d
-
-        a, b = st.columns(2)
-        with a:
-            st.markdown("**Top gainers**")
-            st.dataframe(fmt_movers(gain), use_container_width=True, hide_index=True)
-        with b:
-            st.markdown("**Biggest decliners**")
-            st.dataframe(fmt_movers(lose), use_container_width=True, hide_index=True)
-
-    st.divider()
-    st.subheader("Recent exits — merged or liquidated")
-    vs = st.radio("Compared to", ["prior quarter", "year ago"], horizontal=True)
-    gone = disappeared(cycle, vs, sig)
-    if gone.empty:
-        st.info("No comparison quarter available, or no exits detected.")
-    else:
-        mg = merger_table(sig)
-        cap = (f"{len(gone):,} credit unions were in the {gone.last_cycle.iloc[0]} data "
-               f"but gone by {cycle} — i.e. they merged or were liquidated in between.")
-        ex = pd.DataFrame({
-            "Credit Union": gone.cu_name.values, "State": gone.state.values,
-            "Last assets": [money(x) for x in gone.assets.values],
-            "Last seen": gone.last_cycle.values})
-        if not mg.empty:
-            info = (mg[["merging_charter", "continuing_name", "reason"]]
-                    .drop_duplicates("merging_charter"))
-            j = gone.merge(info, left_on="cu", right_on="merging_charter", how="left")
-            ex["Absorbed by"] = j.continuing_name.fillna("— (liquidated or not yet reported)").values
-            ex["Reason"] = j.reason.fillna("—").values
-            cap += " Acquirer and reason come from the NCUA Insurance Report of Activity."
-        else:
-            cap += (" Charter disappearance alone can't name the acquirer — ingest the merger "
-                    "report to add that.")
-        st.caption(cap)
-        st.dataframe(ex, use_container_width=True, hide_index=True, height=460)
-
-# ============================================================ INDUSTRY
+# ============================================================ MERGER HISTORY
 elif page == "Merger History":
     st.subheader("Merger history")
     mg = merger_table(sig)
