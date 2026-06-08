@@ -2687,7 +2687,8 @@ if page == "Profile":
                 sc1, sc2 = st.columns(2)
                 stmt = sc1.radio("Statement", ["Balance Sheet", "Income Statement"],
                                  horizontal=True)
-                pmode = sc2.radio("Periods", ["Quarters", "Years"], horizontal=True)
+                pmode = sc2.radio("Periods", ["Quarters", "Years"],
+                                  horizontal=True, index=1)
                 schema = BALANCE_SHEET if stmt == "Balance Sheet" else INCOME_STATEMENT
                 sdf = build_statement(cu, schema, stmt == "Income Statement", pmode, cycle, sig)
                 if sdf.empty:
@@ -2756,7 +2757,7 @@ if page == "Profile":
                     tsd = cu_timeseries(cu, sig)
                     trend_opts = [k for k, _, _, _ in METRICS if not k.endswith("_growth")]
                     tc1, tc2 = st.columns([1, 3])
-                    tspan = tc1.radio("Period", ["Quarters", "Years"], horizontal=True)
+                    tspan = tc1.radio("Period", ["Quarters", "Years"], horizontal=True, index=1)
                     _tr_default = [k for k in ["roa","nim","efficiency","nw_ratio"]
                                    if k in trend_opts]
                     chosen = tc2.multiselect(
@@ -2884,6 +2885,7 @@ elif page == "FPR":
                                format_func=lambda c: ALL_LABELS[c])
         view = h2.radio("Report", ["Financial Summary", "Key Ratios", "Historical Ratios"],
                         horizontal=True)
+        st.session_state.setdefault("fpr_span", "Years")
         pmode = h3.radio("Period", ["Quarters", "Years"], horizontal=True, key="fpr_span")
         info = mt[mt.cu == cu_pick]
         st_, band = (info.state.iloc[0] if not info.empty else ""), \
@@ -3035,6 +3037,7 @@ elif page == "Compare":
         if len(all_cycles) > 1:
             st.subheader("Trend Overlays")
             oc1, oc2 = st.columns([1, 3])
+            st.session_state.setdefault("cmp_span", "Years")
             ov_span = oc1.radio("Period", ["Quarters", "Years"], horizontal=True,
                                 key="cmp_span")
             ov_opts = [k for k, _, _, _ in METRICS if not k.endswith("_growth")]
@@ -3132,11 +3135,13 @@ elif page == "Chart":
 
     with tab_data:
         tf1, tf2 = st.columns([1, 3])
+        st.session_state.setdefault("chart_span", "Years")
         span = tf1.radio("Period", ["Quarters", "Years"], horizontal=True, key="chart_span")
         cyc_opts = [c for c in sorted(all_cycles) if span == "Quarters" or c.endswith("-12")]
         if len(cyc_opts) >= 2:
+            _lo_2020 = next((c for c in cyc_opts if c >= "2020-12"), cyc_opts[0])
             lo, hi = tf2.select_slider("Range", options=cyc_opts,
-                                       value=(cyc_opts[0], cyc_opts[-1]),
+                                       value=(_lo_2020, cyc_opts[-1]),
                                        format_func=lambda c: _period_label(c, span))
             in_range = [c for c in cyc_opts if lo <= c <= hi]
         else:
