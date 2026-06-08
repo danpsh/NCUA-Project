@@ -354,115 +354,6 @@ def to_excel_bytes(sheets):
     return buf.getvalue()
 
 
-def _stars_pdf(n):
-    n = int(n) if pd.notna(n) else 0
-    return "\u2605" * n + "\u2606" * (5 - n)
-
-
-def tearsheet_pdf(row, cycle, lens, hist, vals):
-    """One-page PDF tearsheet for a single credit union."""
-    from reportlab.lib.pagesizes import LETTER
-    from reportlab.lib import colors
-    from reportlab.lib.units import inch
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer,
-                                     Table, TableStyle)
-    buf = io.BytesIO()
-    doc = SimpleDocTemplate(
-        buf, pagesize=LETTER, topMargin=0.55 * inch, bottomMargin=0.45 * inch,
-        leftMargin=0.6 * inch, rightMargin=0.6 * inch,
-        title=f"{row.cu_name} — {cycle} tearsheet")
-    S = getSampleStyleSheet()
-    teal = colors.HexColor("#0b6b5e")
-    grey = colors.HexColor("#666666")
-    grid = colors.HexColor("#dddddd")
-    headbg = colors.HexColor("#eef2f1")
-    title = ParagraphStyle("t", parent=S["Title"], fontSize=17, alignment=0, spaceAfter=1)
-    subt = ParagraphStyle("s", parent=S["Normal"], fontSize=9, textColor=grey)
-    big = ParagraphStyle("b", parent=S["Normal"], fontSize=11, spaceBefore=4)
-    sec = ParagraphStyle("sec", parent=S["Heading4"], fontSize=10.5,
-                         textColor=teal, spaceBefore=11, spaceAfter=3)
-    foot = ParagraphStyle("f", parent=S["Normal"], fontSize=7.5, textColor=grey)
-
-    def tbl(data, widths, header=True):
-        t = Table(data, colWidths=widths)
-        sty = [("FONTSIZE", (0, 0), (-1, -1), 9),
-               ("GRID", (0, 0), (-1, -1), 0.5, grid),
-               ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-               ("LEFTPADDING", (0, 0), (-1, -1), 6),
-               ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-               ("TOPPADDING", (0, 0), (-1, -1), 3),
-               ("BOTTOMPADDING", (0, 0), (-1, -1), 3)]
-        if header:
-            sty += [("BACKGROUND", (0, 0), (-1, 0), headbg),
-                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold")]
-        t.setStyle(TableStyle(sty))
-        return t
-
-    el = [Paragraph(row.cu_name, title),
-          Paragraph(f"Charter #{row.cu} &nbsp;·&nbsp; {row.state} &nbsp;·&nbsp; {cycle} "
-                    f"&nbsp;·&nbsp; peer group {row.band}", subt)]
-    sc = f"{row.score:.0f}/100" if pd.notna(row.score) else "\u2014"
-    el.append(Paragraph(
-        f"<b>Composite score {sc}</b> &nbsp; {_stars_pdf(row.stars)} "
-        f"&nbsp;&nbsp;<font color='#666' size=8>{lens}</font>", big))
-
-    el.append(Paragraph("Key figures", sec))
-    el.append(tbl([
-        ["Total Assets", money(row.assets), "Net Worth", money(row.net_worth)],
-        ["Members", intfmt(row.members), "Net Worth Ratio", pct(row.nw_ratio)],
-        ["ROA", pct(row.roa), "Efficiency Ratio", pct(row.efficiency)],
-    ], [1.3 * inch, 1.7 * inch, 1.6 * inch, 1.6 * inch], header=False))
-
-    def col2(left, right):
-        t = Table([[left, right]], colWidths=[3.35 * inch, 3.35 * inch])
-        t.setStyle(TableStyle([
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("LEFTPADDING", (0, 0), (0, 0), 0), ("RIGHTPADDING", (0, 0), (0, 0), 12),
-            ("LEFTPADDING", (1, 0), (1, 0), 0), ("RIGHTPADDING", (1, 0), (-1, -1), 0),
-            ("TOPPADDING", (0, 0), (-1, -1), 0), ("BOTTOMPADDING", (0, 0), (-1, -1), 0)]))
-        return t
-
-    rk = ["roa", "roe", "nim", "efficiency", "nw_ratio", "delinquency", "nco", "lts"]
-    ratio_tbl = tbl([["Metric", "Value"]] + [[META[k][0], fmt(k, row[k])] for k in rk],
-                    [2.1 * inch, 1.05 * inch])
-    growth_tbl = tbl([["Metric", "Value"]] + [[META[k][0], fmt(k, row[k])] for k in GROWTH_KEYS],
-                     [2.1 * inch, 1.05 * inch])
-    left = [Paragraph("Profitability, capital &amp; asset quality", sec), ratio_tbl]
-    right = [Paragraph("Growth", sec), growth_tbl]
-    if hist is not None and len(hist) > 1:
-        hdata = [["Year", "Peer Score", "Stars"]]
-        for ix, r in hist.iterrows():
-            lbl = ix[:4] if str(ix).endswith("-12") else str(ix)
-            hdata.append([lbl, f"{r.score:.0f}/100", stars_str(r.stars)])
-        right += [Paragraph("Peer score history", sec),
-                  tbl(hdata, [1.0 * inch, 1.2 * inch, 1.0 * inch])]
-    el.append(col2(left, right))
-
-    lm = mix_frame(vals, LOAN_MIX, "ACCT_025B", "Other")
-    dm = mix_frame(vals, DEPOSIT_MIX, "ACCT_018", "Other (incl. IRA / Keogh)")
-    cell = ParagraphStyle("cell", parent=S["Normal"], fontSize=8.5, leading=10)
-
-    def mix_tbl(mx):
-        data = [["Category", "Amt", "Share"]] + [
-            [Paragraph(r["Category"], cell), f"${r['Amount ($M)']:,.1f}M", f"{r['Share']:.1f}%"]
-            for _, r in mx.iterrows()]
-        return tbl(data, [1.9 * inch, 0.75 * inch, 0.65 * inch])
-    mleft = [Paragraph("Loan mix", sec), mix_tbl(lm)] if not lm.empty else []
-    mright = [Paragraph("Deposit mix", sec), mix_tbl(dm)] if not dm.empty else []
-    if mleft or mright:
-        el.append(col2(mleft, mright))
-
-    el.append(Spacer(1, 10))
-    el.append(Paragraph(
-        "Source: NCUA 5300 Call Report. Peer score = percentile rank within asset band "
-        "(50 = band median, 75+ = top quartile) under the selected lens. Loan and deposit composition are from "
-        "Section 1 and the supplemental share schedule. Generated by NCUA Call Report "
-        "Explorer.", foot))
-    doc.build(el)
-    return buf.getvalue()
-
-
 @st.cache_data(show_spinner=False)
 def cycles():
     rows = con.execute(
@@ -2488,7 +2379,7 @@ elif st.session_state.get("dev_mode"):
     NAV_VISIBLE = NAV
 else:
     NAV_VISIBLE = _PUBLIC_NAV
-    with st.sidebar.expander("🔐 Dev access"):
+    with st.sidebar.expander("🔐 Developer Access"):
         _pw_in = st.text_input("Password", type="password", key="dev_pw_input",
                                label_visibility="collapsed", placeholder="Enter password")
         if _pw_in and _pw_in == _dev_pw:
@@ -2737,24 +2628,12 @@ if page == "Profile":
                 st.divider()
                 sc = pd.DataFrame(
                     {"Value": {META[k][0]: fmt(k, row[k]) for k, _, _, _ in METRICS}})
-                dl1, dl2 = st.columns(2)
-                dl1.download_button(
+                st.download_button(
                     "Download scorecard (Excel)",
                     to_excel_bytes({"Scorecard": sc}),
                     file_name=f"{row.cu_name}_{cycle}_scorecard.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,
                 )
-                try:
-                    pdf_bytes = tearsheet_pdf(row, cycle, lens, hist,
-                                              acct_values(cu, cycle, sig))
-                    dl2.download_button(
-                        "Download tearsheet (PDF)", pdf_bytes,
-                        file_name=f"{row.cu_name}_{cycle}_tearsheet.pdf",
-                        mime="application/pdf", use_container_width=True,
-                    )
-                except Exception as exc:
-                    dl2.caption(f"PDF tearsheet unavailable ({exc}).")
                 with st.expander("Efficiency Ratio breakdown"):
                     nii = row.int_income - row.int_expense
                     rev = nii + row.non_int_income
