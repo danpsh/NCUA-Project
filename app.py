@@ -504,6 +504,7 @@ def metrics_table(cycle):
     pye = f"{int(cycle[:4]) - 1}-12"          # prior year-end, for FPR average balances
     d = con.execute(f"""
       SELECT o.CU_NUMBER AS cu, o.CU_NAME AS cu_name, COALESCE(o.STATE, '') AS state,
+        COALESCE(o.CITY, '') AS city,
         TRY_CAST(f.ACCT_010  AS DOUBLE) AS assets,
         TRY_CAST(p.assets_pye AS DOUBLE) AS assets_pye,
         TRY_CAST(p.loans_pye  AS DOUBLE) AS loans_pye,
@@ -753,7 +754,7 @@ def rate_table(cycle, cycle_sig):
 
     rdf = pd.DataFrame({"cu": idx, "yl": yl.values, "yi": yi.values, "yea": yea.values,
                         "cof": cof.values, "spread": spread.values, "nim": nim.values})
-    base = metrics_table(cycle)[["cu", "cu_name", "state", "band", "assets"]].copy()
+    base = metrics_table(cycle)[["cu", "cu_name", "state", "city", "band", "assets"]].copy()
     base["cu"] = base.cu.astype(str)
     return base.merge(rdf, on="cu", how="left")
 
@@ -4035,7 +4036,8 @@ elif page == "Rankings":
     # Always show Total Assets right after the star rating, for size context.
     show_keys = [k for k in show_keys if k != "assets"]
     show_keys.insert(2, "assets")
-    disp = pd.DataFrame({"Credit Union": view.cu_name.values, "State": view.state.values})
+    disp = pd.DataFrame({"Credit Union": view.cu_name.values, "City": view.city.values,
+                         "State": view.state.values})
     colcfg = {}
     for k in show_keys:
         lbl, f = META[k][0], META[k][1]
@@ -4190,7 +4192,8 @@ elif page == "Yields":
         if v.empty:
             st.info("No credit unions with valid figures for this filter.")
         else:
-            disp = pd.DataFrame({"Credit Union": v.cu_name.values, "State": v.state.values,
+            disp = pd.DataFrame({"Credit Union": v.cu_name.values, "City": v.city.values,
+                                 "State": v.state.values,
                                  "Total Assets": v.assets.round(0).values})
             colcfg = {"Total Assets": st.column_config.NumberColumn("Total Assets",
                                                                     format="$%,.0f")}
@@ -4233,7 +4236,8 @@ elif page == "M&A Targets":
         sub = sub.assign(target=(100 * (0.25 * size + 0.25 * shrink
                                         + 0.25 * cap + 0.25 * earn)).round(0))
         v = sub.sort_values("target", ascending=False)
-        disp = pd.DataFrame({"Credit Union": v.cu_name.values, "State": v.state.values,
+        disp = pd.DataFrame({"Credit Union": v.cu_name.values, "City": v.city.values,
+                             "State": v.state.values,
                              "Band": v.band.values, "Total Assets": v.assets.round(0).values,
                              "Asset Growth": v.assets_growth.values,
                              "Member Growth": v.members_growth.values,
