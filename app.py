@@ -2521,7 +2521,7 @@ if page == "Profile":
         st.info("Type part of a credit union name to begin.")
     else:
         hits = mt[name_matches(mt.cu_name, query)].head(300)
-        st.caption(f"{len(hits)} match(es) in {cycle}")
+        st.caption(f"{len(hits)} match{'es' if len(hits) != 1 else ''} in {cycle}")
         if not hits.empty:
             labels = {r.cu: ALL_LABELS[r.cu] for r in hits.itertuples()}
             _opts = list(labels)
@@ -2538,11 +2538,9 @@ if page == "Profile":
                         if (not ts.empty and prev_cy in ts.index) else None)
 
             st.subheader(labels[cu])
-            st.caption(f"Asset peer group: {row.band}")
             _fr   = foicu_row(cu, cycle, sig)
             _city = row.city.title() if row.city else ""
-            _st   = row.state or ""
-            _loc  = ", ".join(filter(None, [_city, _st]))
+            _loc  = ", ".join(filter(None, [_city, row.state or ""]))
             _web_raw = next((_fr.get(k, "") for k in
                              ["WEB_ADDR", "WEB_SITE", "WEBSITE", "URL", "SITE_URL"]
                              if _fr.get(k, "")), "")
@@ -2550,13 +2548,14 @@ if page == "Profile":
             if _web and not _web.lower().startswith("http"):
                 _web = "https://" + _web
             _web_disp = _web.lower().replace("https://","").replace("http://","").rstrip("/")
-            _loc_parts = [p for p in [_loc,
-                (f'<a href="{_web}" target="_blank">{_web_disp}</a>' if _web else "")] if p]
-            if _loc_parts:
-                st.markdown(
-                    f'<p style="color:#64748b;font-size:0.85rem;margin-top:-8px">'
-                    + " · ".join(_loc_parts) + "</p>",
-                    unsafe_allow_html=True)
+            _meta_parts = [p for p in [
+                f"Peer band: {row.band}", _loc,
+                (f'<a href="{_web}" target="_blank">{_web_disp}</a>' if _web else "")]
+                if p]
+            st.markdown(
+                f'<p style="color:#64748b;font-size:0.83rem;margin-top:-6px">'
+                + " · ".join(_meta_parts) + "</p>",
+                unsafe_allow_html=True)
             _cv = conversions_table(sig)
             if not _cv.empty and "new_charter" in _cv.columns:
                 _pred = _cv[_cv.new_charter == cu]
@@ -2570,17 +2569,16 @@ if page == "Profile":
             h = st.columns(5)
             for c, key in zip(h[:4], ["assets", "members", "nw_ratio", "roa"]):
                 metric_card(c, key, row, prev_row)
-            h[4].metric("Peer Score",
-                        f"{row.score:.0f}/100" if pd.notna(row.score) else "—",
-                        help=f"{lens} percentile rank within the {row.band} asset band; "
-                             "50 = band median, 80+ = ★★★★★.")
-            st.markdown(
-                f"<div style='font-size:1.6rem;line-height:1.1'>{stars_str(row.stars)}"
-                "</div>", unsafe_allow_html=True)
-            cap = f"{lens} peer score vs {row.band} peers — 50 = band median, 80+ = ★★★★★."
+            with h[4]:
+                st.metric("Peer Score",
+                          f"{row.score:.0f}/100" if pd.notna(row.score) else "—",
+                          help=f"{lens} percentile rank within the {row.band} asset band; "
+                               "50 = band median, 80+ = ★★★★★.")
+                st.markdown(
+                    f"<div style='font-size:1.25rem;line-height:1;margin-top:-10px'>"
+                    f"{stars_str(row.stars)}</div>", unsafe_allow_html=True)
             if prev_row is not None:
-                cap += f"  ·  ▲▼ deltas vs prior quarter ({prev_cy})."
-            st.caption(cap)
+                st.caption(f"▲▼ deltas vs prior quarter ({prev_cy}).")
             st.markdown("""<style>
             button[data-testid="stTab"]{font-size:.95rem !important;padding:10px 22px !important;font-weight:500 !important}
             </style>""", unsafe_allow_html=True)
@@ -2759,9 +2757,11 @@ if page == "Profile":
                     trend_opts = [k for k, _, _, _ in METRICS if not k.endswith("_growth")]
                     tc1, tc2 = st.columns([1, 3])
                     tspan = tc1.radio("Period", ["Quarters", "Years"], horizontal=True)
+                    _tr_default = [k for k in ["roa","nim","efficiency","nw_ratio"]
+                                   if k in trend_opts]
                     chosen = tc2.multiselect(
                         "Metrics to chart", trend_opts,
-                        default=trend_opts,
+                        default=_tr_default,
                         format_func=lambda k: META[k][0])
                     peer_tr = st.checkbox(
                         "Add peer median (asset band)", value=False, key="prof_peer_tr",
@@ -2790,8 +2790,7 @@ if page == "Profile":
                     "Compare against",
                     ["Similar asset size", f"Same state ({row.state})",
                      "Same state + asset size", "Statistical twins (auto)",
-                     "All credit unions", "Custom (pick CUs)"],
-                    horizontal=True)
+                     "All credit unions", "Custom (pick CUs)"])
                 if basis_choice == "Custom (pick CUs)":
                     picks = st.multiselect("Choose peer credit unions",
                                            list(ALL_LABELS),
@@ -2843,7 +2842,7 @@ if page == "Profile":
                                "delinquency, and charge-offs).")
                 else:
                     st.info("Pick at least one peer to benchmark against.")
-                with st.expander("Identity / FOICU Fields"):
+                with st.expander("Administrative Details"):
                     foicu = con.execute(
                         f"SELECT * FROM read_parquet('{glob_for('FOICU')}', "
                         "hive_partitioning=true, union_by_name=true) "
