@@ -2527,8 +2527,10 @@ if page == "Profile":
             _opts = list(labels)
             _pp = st.session_state.get("profile_pick")
             _idx = _opts.index(_pp) if _pp in labels else 0
-            cu = st.selectbox("Select a credit union", _opts, index=_idx,
-                              format_func=lambda n: labels[n])
+            _sc2, _ = st.columns([2, 1])
+            cu = _sc2.selectbox("Select a credit union", _opts, index=_idx,
+                                format_func=lambda n: labels[n],
+                                label_visibility="collapsed")
             row = mt[mt.cu == cu].iloc[0]
             ts = cu_timeseries(cu, sig)
             prev_cy = prior_cycle(cycle)
@@ -2587,21 +2589,58 @@ if page == "Profile":
 
             # ===================================================== OVERVIEW
             with tab_ov:
-                scorecard_groups = [
-                    ("Size & Balance Sheet",
-                     ["assets", "loans", "shares", "net_worth", "net_income", "members"]),
-                    (f"Growth ({growth_label})", GROWTH_KEYS),
-                    ("Profitability", ["roa", "roe", "nim", "efficiency"]),
-                    ("Capital, Asset Quality & Liquidity",
-                     ["nw_ratio", "delinquency", "nco", "lts"]),
-                ]
-                for i, (title, keys) in enumerate(scorecard_groups):
-                    if i:
-                        st.divider()
-                    st.markdown(f"**{title}**")
-                    cols = st.columns(len(keys))
-                    for col, key in zip(cols, keys):
-                        metric_card(col, key, row, prev_row)
+                def _mtbl(keys):
+                    rows = []
+                    for key in keys:
+                        if key not in META:
+                            continue
+                        cur = row.get(key)
+                        val_s = ((money_compact(cur) if META[key][1] == "money"
+                                  else fmt(key, cur))
+                                 if pd.notna(cur) else "—")
+                        dt, _ = _delta(key, cur,
+                                       prev_row.get(key) if prev_row else None)
+                        rows.append({"Metric": META[key][0],
+                                     "Value":  val_s,
+                                     "QoQ Δ": dt or "—"})
+                    return pd.DataFrame(rows)
+
+                _tc = {"Metric": st.column_config.TextColumn("Metric", width="medium"),
+                       "Value":  st.column_config.TextColumn("Value",  width="small"),
+                       "QoQ Δ": st.column_config.TextColumn("QoQ Δ", width="small")}
+
+                _oc1, _oc2 = st.columns(2)
+                with _oc1:
+                    st.markdown('<p style="font-size:.82rem;font-weight:600;'
+                                'color:#374151;margin:0 0 4px">Size & Balance Sheet</p>',
+                                unsafe_allow_html=True)
+                    st.dataframe(_mtbl(["assets","loans","shares",
+                                        "net_worth","net_income","members"]),
+                                 use_container_width=True, hide_index=True,
+                                 height=256, column_config=_tc)
+                with _oc2:
+                    st.markdown(f'<p style="font-size:.82rem;font-weight:600;'
+                                f'color:#374151;margin:0 0 4px">Growth ({growth_label})</p>',
+                                unsafe_allow_html=True)
+                    st.dataframe(_mtbl(GROWTH_KEYS),
+                                 use_container_width=True, hide_index=True,
+                                 height=190, column_config=_tc)
+
+                _oc3, _oc4 = st.columns(2)
+                with _oc3:
+                    st.markdown('<p style="font-size:.82rem;font-weight:600;'
+                                'color:#374151;margin:8px 0 4px">Profitability</p>',
+                                unsafe_allow_html=True)
+                    st.dataframe(_mtbl(["roa","roe","nim","efficiency"]),
+                                 use_container_width=True, hide_index=True,
+                                 height=190, column_config=_tc)
+                with _oc4:
+                    st.markdown('<p style="font-size:.82rem;font-weight:600;'
+                                'color:#374151;margin:8px 0 4px">Capital & Asset Quality</p>',
+                                unsafe_allow_html=True)
+                    st.dataframe(_mtbl(["nw_ratio","delinquency","nco","lts"]),
+                                 use_container_width=True, hide_index=True,
+                                 height=190, column_config=_tc)
 
                 st.divider()
                 st.markdown("**Composite Score History**")
