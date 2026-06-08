@@ -857,7 +857,8 @@ def enriched_table(cycle, basis, lens, cycle_sig):
         wsum = wsum + contrib.notna().astype(float) * w
     df["score_pct"] = (acc / wsum).where(wsum >= SCORE_MIN_COVERAGE)  # need ≥60% weight present
     df["score"] = (100 * df["score_pct"]).round(0)        # 0–100; 50 = band median
-    df["stars"] = df["score_pct"].apply(stars_from_pct)
+    df["stars"] = df["score"].apply(
+        lambda s: stars_from_pct(s / 100) if pd.notna(s) else np.nan)
     return df
 
 
