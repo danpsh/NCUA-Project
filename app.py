@@ -196,13 +196,28 @@ def stars_from_z(z):
 def stars_from_pct(p):
     if pd.isna(p):
         return np.nan
-    if p >= 0.75:
+    if p >= 0.80:
         return 5
-    if p >= 0.55:
+    if p >= 0.60:
         return 4
-    if p >= 0.35:
+    if p >= 0.40:
         return 3
-    if p >= 0.15:
+    if p >= 0.20:
+        return 2
+    return 1
+
+
+def stars_from_score(s):
+    """Assign stars directly from the 0–100 peer score."""
+    if pd.isna(s):
+        return np.nan
+    if s >= 80:
+        return 5
+    if s >= 60:
+        return 4
+    if s >= 40:
+        return 3
+    if s >= 20:
         return 2
     return 1
 
@@ -748,8 +763,7 @@ def enriched_table(cycle, basis, lens, cycle_sig):
         wsum = wsum + contrib.notna().astype(float) * w
     df["score_pct"] = (acc / wsum).where(wsum >= SCORE_MIN_COVERAGE)  # need ≥60% weight present
     df["score"] = (100 * df["score_pct"]).round(0)        # 0–100; 50 = band median
-    df["stars"] = df["score"].apply(
-        lambda s: stars_from_pct(s / 100) if pd.notna(s) else np.nan)
+    df["stars"] = df["score"].apply(stars_from_score)
     return df
 
 
