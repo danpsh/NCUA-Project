@@ -3,12 +3,21 @@ NCUA Call Report Explorer  (Streamlit + DuckDB over Parquet)
 ============================================================
 
 Tabs:
-  Profile  -- scorecard, watch flags, trend charts, peer benchmarking
-              (incl. custom peer sets), raw-table browse, Excel export.
-  Compare  -- side-by-side scorecards for several CUs, trend overlay, Excel.
-  Rankings -- screen/sort all CUs by any metric, filtered by state & size.
-  Movers   -- biggest YoY gainers/decliners; likely-merger flags.
-  Industry -- system-wide totals & medians over time, and by state.
+  Profile      -- KPI cards, 4-quadrant metric tables, score history, Financials
+                  (balance sheet / income statement / yield spread / mix),
+                  Trends, Peers (benchmark bars, custom peer sets).
+  FPR          -- NCUA Financial Performance Report; account-level detail with
+                  peer-band context.
+  ROA Bridge   -- waterfall decomposition of ROA vs peer median.
+  Compare      -- side-by-side scorecards for multiple CUs; trend overlays.
+  Chart        -- flexible multi-CU chart builder; any metric, Years/Quarters,
+                  date-range slider, snapshot (pie/donut/bar).
+  Rankings     -- screen/sort all CUs by any metric; filter by state & asset size.
+  Yields       -- deposit and loan rate tables; spread analysis.
+  M&A Targets  -- scored acquisition-target screen; weighted composite ranking.
+  Merger Hist. -- NCUA Insurance Report of Activity; absorbed & converted charters.
+  Industry     -- system-wide totals & medians over time; by asset band and state.
+  Data Health  -- data-quality flags; missing values and implausible ratios.
 
 Notes:
 - read_parquet uses union_by_name so NCUA's column changes across years don't
