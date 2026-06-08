@@ -2353,10 +2353,8 @@ NAV_ICON = {"Profile": "👤", "FPR": "📄", "ROA Bridge": "🌉", "Compare": "
 _qp = st.query_params
 if _qp.get("view") in NAV:
     st.session_state["nav_page"] = _qp.get("view")
-if _qp.get("cu"):
-    st.session_state["profile_pending_cu"] = _qp.get("cu")
-if ("view" in _qp) or ("cu" in _qp):
-    st.query_params.clear()
+if "view" in _qp:
+    del st.query_params["view"]   # clear only "view"; Profile reads "cu" directly
 
 st.sidebar.markdown("""<style>
 section[data-testid="stSidebar"] div[data-testid="stButton"]{margin:1px 0}
@@ -2499,13 +2497,17 @@ def screen_filters(df, key, default_top=100, show_top=True):
 
 # ============================================================ PROFILE
 if page == "Profile":
-    _pend = st.session_state.pop("profile_pending_cu", None)
-    if _pend is not None:
+    # Read CU from URL directly (reliable) or session fallback
+    _pend_raw = (st.query_params.get("cu")
+                 or st.session_state.pop("profile_pending_cu", None))
+    if _pend_raw:
+        if "cu" in st.query_params:
+            del st.query_params["cu"]  # clear from URL after reading
         try:
-            _pend = int(_pend)
+            _pend = int(_pend_raw)
         except (TypeError, ValueError):
-            pass
-        if isinstance(_pend, int):
+            _pend = None
+        if _pend is not None:
             _phit = mt[mt.cu == _pend]
             if not _phit.empty:
                 st.session_state["profile_search"] = _phit.iloc[0].cu_name
